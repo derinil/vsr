@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/derinil/vsr/message"
 )
 
-func isMsg[T Message](e envelope) bool {
+func isMsg[T message.Message](e envelope) bool {
 	_, ok := e.msg.(T)
 	return ok
 }
@@ -136,15 +138,15 @@ func TestReconfigPrimaryCrashBeforeCommit(t *testing.T) {
 	admin := c.addClient(0)
 	c.submit(cl)
 	c.settle()
-	c.filter = isMsg[PrepareOK]
+	c.filter = isMsg[message.PrepareOK]
 	next := []string{"r1", "r2", "r3"}
 	c.reconfigure(admin, next)
 	c.settle()
-	if log := c.replicas[0].Log(); len(log) != 2 || log[1].Kind != EntryReconfig {
+	if log := c.replicas[0].Log(); len(log) != 2 || log[1].Kind != message.EntryReconfig {
 		t.Fatalf("reconfiguration not prepared at primary: %v", log)
 	}
 	c.crash(0)
-	c.filter = func(e envelope) bool { return isMsg[PrepareOK](e) && e.msg.(PrepareOK).View == 1 }
+	c.filter = func(e envelope) bool { return isMsg[message.PrepareOK](e) && e.msg.(message.PrepareOK).View == 1 }
 	ok := c.waitForReplicas(func() bool {
 		return c.replicas[1].IsPrimary() && c.replicas[1].View() == 1 && c.replicas[2].Status() == StatusNormal
 	}, 500, 1, 2)
@@ -178,7 +180,7 @@ func TestReconfigMemberMissesCommit(t *testing.T) {
 	admin := c.addClient(0)
 	c.submit(cl)
 	c.settle()
-	c.filter = func(e envelope) bool { return e.to == 1 && isMsg[Commit](e) }
+	c.filter = func(e envelope) bool { return e.to == 1 && isMsg[message.Commit](e) }
 	next := []string{"r0", "r1", "r3"}
 	c.reconfigure(admin, next)
 	c.settle()
@@ -205,7 +207,7 @@ func TestReconfigLaggingMemberCatchesUp(t *testing.T) {
 	admin := c.addClient(0)
 	c.submit(cl)
 	c.settle()
-	c.filter = func(e envelope) bool { return e.to == 1 && isMsg[Prepare](e) }
+	c.filter = func(e envelope) bool { return e.to == 1 && isMsg[message.Prepare](e) }
 	next := []string{"r0", "r1", "r3"}
 	c.reconfigure(admin, next)
 	c.settle()
@@ -299,7 +301,7 @@ func TestReconfigRejected(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newCluster(t, 3, 1)
 			cl := c.addClient(0)
-			c.enqueue(envelope{from: -1, to: 0, msg: Reconfiguration{Epoch: tt.epoch, ClientID: cl.id, RequestNum: 1, Config: tt.config}})
+			c.enqueue(envelope{from: -1, to: 0, msg: message.Reconfiguration{Epoch: tt.epoch, ClientID: cl.id, RequestNum: 1, Config: tt.config}})
 			c.settle()
 			c.check()
 			if r := c.replicas[0]; r.Epoch() != 0 || r.OpNum() != 0 {
@@ -315,15 +317,15 @@ func TestReconfigWhilePendingRejected(t *testing.T) {
 	admin := c.addClient(0)
 	c.submit(cl)
 	c.settle()
-	c.filter = isMsg[PrepareOK]
+	c.filter = isMsg[message.PrepareOK]
 	c.reconfigure(admin, []string{"r0", "r1", "r3"})
 	c.settle()
-	c.enqueue(envelope{from: -1, to: 0, msg: Reconfiguration{Epoch: 0, ClientID: 9, RequestNum: 1, Config: []string{"r0", "r2", "r3"}}})
+	c.enqueue(envelope{from: -1, to: 0, msg: message.Reconfiguration{Epoch: 0, ClientID: 9, RequestNum: 1, Config: []string{"r0", "r2", "r3"}}})
 	c.settle()
 	c.check()
 	reconfigs := 0
 	for _, e := range c.replicas[0].Log() {
-		if e.Kind == EntryReconfig {
+		if e.Kind == message.EntryReconfig {
 			reconfigs++
 		}
 	}
@@ -344,7 +346,7 @@ func TestRequestsDuringReconfigDroppedThenRetried(t *testing.T) {
 	admin := c.addClient(0)
 	c.submit(cl)
 	c.settle()
-	c.filter = isMsg[PrepareOK]
+	c.filter = isMsg[message.PrepareOK]
 	next := []string{"r0", "r1", "r3"}
 	c.reconfigure(admin, next)
 	c.settle()
@@ -368,12 +370,12 @@ func TestRequestsDuringReconfigDroppedThenRetried(t *testing.T) {
 }
 
 type outboxLog struct {
-	sent    []Message
-	replies []Message
+	sent    []message.Message
+	replies []message.Message
 }
 
-func (o *outboxLog) Send(_ string, m Message)  { o.sent = append(o.sent, m) }
-func (o *outboxLog) Reply(_ uint64, m Message) { o.replies = append(o.replies, m) }
+func (o *outboxLog) Send(_ string, m message.Message)  { o.sent = append(o.sent, m) }
+func (o *outboxLog) Reply(_ uint64, m message.Message) { o.replies = append(o.replies, m) }
 
 func TestRemovedReplicaStartsShutDown(t *testing.T) {
 	config := []string{"n0", "n1", "n2"}
@@ -388,15 +390,15 @@ func TestRemovedReplicaStartsShutDown(t *testing.T) {
 			if r.Status() != StatusShutdown || r.Epoch() != 1 || r.Index() != -1 || !slices.Equal(r.Config(), config) || !slices.Equal(r.OldConfig(), old) {
 				t.Fatalf("unexpected initial state: status=%v epoch=%d index=%d config=%v old=%v", r.Status(), r.Epoch(), r.Index(), r.Config(), r.OldConfig())
 			}
-			r.Step(Request{Epoch: 0, ClientID: 5, RequestNum: 1, Op: []byte("op")})
-			r.Step(CheckEpoch{Epoch: 0, ClientID: 5, RequestNum: 2})
-			want := NewEpoch{Epoch: 1, View: 0, Config: config}
-			if !reflect.DeepEqual(out.replies, []Message{want, want}) {
+			r.Step(message.Request{Epoch: 0, ClientID: 5, RequestNum: 1, Op: []byte("op")})
+			r.Step(message.CheckEpoch{Epoch: 0, ClientID: 5, RequestNum: 2})
+			want := message.NewEpoch{Epoch: 1, View: 0, Config: config}
+			if !reflect.DeepEqual(out.replies, []message.Message{want, want}) {
 				t.Fatalf("replies = %#v, want two %#v", out.replies, want)
 			}
-			r.Step(Request{Epoch: 1, ClientID: 5, RequestNum: 3, Op: []byte("op")})
-			r.Step(Prepare{Epoch: 1, OpNum: 1, Entry: Entry{ClientID: 5, RequestNum: 3}})
-			r.Step(Commit{Epoch: 1, CommitNum: 1})
+			r.Step(message.Request{Epoch: 1, ClientID: 5, RequestNum: 3, Op: []byte("op")})
+			r.Step(message.Prepare{Epoch: 1, OpNum: 1, Entry: message.Entry{ClientID: 5, RequestNum: 3}})
+			r.Step(message.Commit{Epoch: 1, CommitNum: 1})
 			for range 100 {
 				r.Tick()
 			}

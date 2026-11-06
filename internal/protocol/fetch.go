@@ -3,6 +3,8 @@ package protocol
 import (
 	"math"
 	"slices"
+
+	"github.com/derinil/vsr/message"
 )
 
 const (
@@ -48,14 +50,14 @@ func (r *Replica) startFetch(minOp uint64, from string) {
 		f.cache = r.fetch.cache
 	}
 	r.fetch = f
-	r.outbox.Send(from, GetCheckpoint{Epoch: r.epoch, MinOpNum: minOp, From: r.addr})
+	r.outbox.Send(from, message.GetCheckpoint{Epoch: r.epoch, MinOpNum: minOp, From: r.addr})
 }
 
 func (r *Replica) fetchingAt(opNum uint64) bool {
 	return r.fetch != nil && r.fetch.target != nil && r.fetch.target.opNum == opNum
 }
 
-func (r *Replica) onGetCheckpoint(m GetCheckpoint) {
+func (r *Replica) onGetCheckpoint(m message.GetCheckpoint) {
 	if m.Epoch != r.epoch || len(r.ckpts) == 0 {
 		return
 	}
@@ -64,9 +66,9 @@ func (r *Replica) onGetCheckpoint(m GetCheckpoint) {
 	}
 }
 
-func (r *Replica) checkpointInfo(cp checkpoint) CheckpointInfo {
+func (r *Replica) checkpointInfo(cp checkpoint) message.CheckpointInfo {
 	root := cp.tree.root()
-	return CheckpointInfo{
+	return message.CheckpointInfo{
 		Epoch:    r.epoch,
 		OpNum:    cp.OpNum,
 		Size:     uint64(cp.tree.size),
@@ -82,7 +84,7 @@ func (r *Replica) replyLatest(to string) {
 	}
 }
 
-func (r *Replica) onCheckpointInfo(m CheckpointInfo) {
+func (r *Replica) onCheckpointInfo(m message.CheckpointInfo) {
 	f := r.fetch
 	if f == nil || m.Epoch != r.epoch || m.OpNum < f.minOp || (f.target != nil && m.OpNum <= f.target.opNum) {
 		return
@@ -161,12 +163,12 @@ func (r *Replica) requestChildren() {
 	}
 	for len(want) > 0 {
 		k := min(len(want), maxMerkleIndices)
-		r.outbox.Send(f.source, GetMerkle{OpNum: f.target.opNum, Level: childLevel, Indices: slices.Clip(want[:k]), From: r.addr})
+		r.outbox.Send(f.source, message.GetMerkle{OpNum: f.target.opNum, Level: childLevel, Indices: slices.Clip(want[:k]), From: r.addr})
 		want = want[k:]
 	}
 }
 
-func (r *Replica) onGetMerkle(m GetMerkle) {
+func (r *Replica) onGetMerkle(m message.GetMerkle) {
 	cp, ok := r.held(m.OpNum)
 	if !ok {
 		r.replyLatest(m.From)
@@ -180,10 +182,10 @@ func (r *Replica) onGetMerkle(m GetMerkle) {
 			hashes = append(hashes, h[:]...)
 		}
 	}
-	r.outbox.Send(m.From, MerkleNodes{OpNum: cp.OpNum, Level: m.Level, Indices: indices, Hashes: hashes})
+	r.outbox.Send(m.From, message.MerkleNodes{OpNum: cp.OpNum, Level: m.Level, Indices: indices, Hashes: hashes})
 }
 
-func (r *Replica) onMerkleNodes(m MerkleNodes) {
+func (r *Replica) onMerkleNodes(m message.MerkleNodes) {
 	f := r.fetch
 	if !r.fetchingAt(m.OpNum) || f.level == 0 || m.Level != f.level-1 || len(m.Hashes) != len(digest{})*len(m.Indices) {
 		return
@@ -281,12 +283,12 @@ func (r *Replica) requestPages() {
 	per := max(1, maxPageRequestBytes/f.target.pageSize)
 	for len(want) > 0 {
 		k := min(len(want), per)
-		r.outbox.Send(f.source, GetPages{OpNum: f.target.opNum, Indices: slices.Clip(want[:k]), From: r.addr})
+		r.outbox.Send(f.source, message.GetPages{OpNum: f.target.opNum, Indices: slices.Clip(want[:k]), From: r.addr})
 		want = want[k:]
 	}
 }
 
-func (r *Replica) onGetPages(m GetPages) {
+func (r *Replica) onGetPages(m message.GetPages) {
 	cp, ok := r.held(m.OpNum)
 	if !ok {
 		r.replyLatest(m.From)
@@ -300,10 +302,10 @@ func (r *Replica) onGetPages(m GetPages) {
 			data = append(data, pageOf(cp.State, cp.tree.pageSize, int(i)))
 		}
 	}
-	r.outbox.Send(m.From, Pages{OpNum: cp.OpNum, Indices: indices, Data: data})
+	r.outbox.Send(m.From, message.Pages{OpNum: cp.OpNum, Indices: indices, Data: data})
 }
 
-func (r *Replica) onPages(m Pages) {
+func (r *Replica) onPages(m message.Pages) {
 	f := r.fetch
 	if !r.fetchingAt(m.OpNum) || f.level != 0 || len(m.Data) != len(m.Indices) {
 		return
@@ -360,7 +362,7 @@ func (r *Replica) restartFetch() {
 	}
 	f.target, f.ref, f.idle = nil, nil, 0
 	f.parents, f.hashes, f.leaves, f.awaiting, f.children = nil, nil, nil, nil, nil
-	r.outbox.Send(f.source, GetCheckpoint{Epoch: r.epoch, MinOpNum: f.minOp, From: r.addr})
+	r.outbox.Send(f.source, message.GetCheckpoint{Epoch: r.epoch, MinOpNum: f.minOp, From: r.addr})
 }
 
 func (r *Replica) fetchPeers() []string {
@@ -375,7 +377,7 @@ func (r *Replica) resendFetch() {
 	case f.idle > maxFetchIdle:
 		r.restartFetch()
 	case f.target == nil:
-		r.outbox.Send(f.source, GetCheckpoint{Epoch: r.epoch, MinOpNum: f.minOp, From: r.addr})
+		r.outbox.Send(f.source, message.GetCheckpoint{Epoch: r.epoch, MinOpNum: f.minOp, From: r.addr})
 	case f.level == 0:
 		r.requestPages()
 	default:

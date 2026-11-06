@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derinil/vsr/internal/protocol"
+	"github.com/derinil/vsr/message"
 )
 
 const (
@@ -23,10 +23,10 @@ var (
 
 type delivery struct {
 	to string
-	m  protocol.Message
+	m  message.Message
 }
 
-type responder func(f *fakeNet, to string, m protocol.Message)
+type responder func(f *fakeNet, to string, m message.Message)
 
 type fakeNet struct {
 	mu      sync.Mutex
@@ -36,11 +36,7 @@ type fakeNet struct {
 	closes  int
 }
 
-func (f *fakeNet) Send(to string, b []byte) {
-	m, err := protocol.DecodeMessage(b)
-	if err != nil {
-		panic(err)
-	}
+func (f *fakeNet) Send(to string, m message.Message) {
 	f.mu.Lock()
 	f.sent = append(f.sent, delivery{to, m})
 	f.mu.Unlock()
@@ -49,7 +45,7 @@ func (f *fakeNet) Send(to string, b []byte) {
 	}
 }
 
-func (f *fakeNet) Reply(uint64, []byte) {}
+func (f *fakeNet) Reply(uint64, message.Message) {}
 
 func (f *fakeNet) Listen(string) error { return nil }
 
@@ -60,7 +56,7 @@ func (f *fakeNet) Close() error {
 	return nil
 }
 
-func (f *fakeNet) deliver(m protocol.Message) { f.handler(encode(m)) }
+func (f *fakeNet) deliver(m message.Message) { f.handler(m) }
 
 func (f *fakeNet) messages() []delivery {
 	f.mu.Lock()
@@ -95,36 +91,36 @@ func newClient(t *testing.T, respond responder, config []string) (*Client, *fake
 	return c, fake
 }
 
-func clientRequest(m protocol.Message) (epoch, num uint64, ok bool) {
+func clientRequest(m message.Message) (epoch, num uint64, ok bool) {
 	switch m := m.(type) {
-	case protocol.Request:
+	case message.Request:
 		return m.Epoch, m.RequestNum, true
-	case protocol.Reconfiguration:
+	case message.Reconfiguration:
 		return m.Epoch, m.RequestNum, true
-	case protocol.CheckEpoch:
+	case message.CheckEpoch:
 		return m.Epoch, m.RequestNum, true
 	}
 	return 0, 0, false
 }
 
-func replyTo(m protocol.Message, view uint64, result string) (protocol.Reply, bool) {
+func replyTo(m message.Message, view uint64, result string) (message.Reply, bool) {
 	epoch, num, ok := clientRequest(m)
 	if !ok {
-		return protocol.Reply{}, false
+		return message.Reply{}, false
 	}
-	id, _ := protocol.ClientOf(m)
-	return protocol.Reply{Epoch: epoch, View: view, ClientID: id, RequestNum: num, Result: []byte(result)}, true
+	id, _ := message.ClientOf(m)
+	return message.Reply{Epoch: epoch, View: view, ClientID: id, RequestNum: num, Result: []byte(result)}, true
 }
 
 func replyOn(addr string, view uint64, result string) responder {
-	return func(f *fakeNet, to string, m protocol.Message) {
+	return func(f *fakeNet, to string, m message.Message) {
 		if r, ok := replyTo(m, view, result); ok && to == addr {
 			f.deliver(r)
 		}
 	}
 }
 
-func answerAll(f *fakeNet, _ string, m protocol.Message) {
+func answerAll(f *fakeNet, _ string, m message.Message) {
 	if r, ok := replyTo(m, 0, "ok"); ok {
 		f.deliver(r)
 	}
@@ -203,7 +199,7 @@ func TestInvoke(t *testing.T) {
 		},
 		{
 			name: "stale reply ignored",
-			respond: func(f *fakeNet, to string, m protocol.Message) {
+			respond: func(f *fakeNet, to string, m message.Message) {
 				r, ok := replyTo(m, 0, "ok")
 				if !ok || to != "r0" {
 					return
@@ -222,7 +218,7 @@ func TestInvoke(t *testing.T) {
 		},
 		{
 			name: "reply for other client ignored",
-			respond: func(f *fakeNet, to string, m protocol.Message) {
+			respond: func(f *fakeNet, to string, m message.Message) {
 				r, ok := replyTo(m, 0, "ok")
 				if !ok || to != "r0" {
 					return
@@ -242,10 +238,10 @@ func TestInvoke(t *testing.T) {
 		},
 		{
 			name: "new epoch redirects request to new primary",
-			respond: func(f *fakeNet, to string, m protocol.Message) {
+			respond: func(f *fakeNet, to string, m message.Message) {
 				switch to {
 				case "r0":
-					f.deliver(protocol.NewEpoch{Epoch: 1, Config: newConfig})
+					f.deliver(message.NewEpoch{Epoch: 1, Config: newConfig})
 				case "n0":
 					if r, ok := replyTo(m, 0, "ok"); ok {
 						f.deliver(r)
@@ -324,7 +320,7 @@ func TestInvokeContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			answer := false
-			c, _ := newClient(t, func(f *fakeNet, to string, m protocol.Message) {
+			c, _ := newClient(t, func(f *fakeNet, to string, m message.Message) {
 				if r, ok := replyTo(m, 0, "ok"); ok && answer && to == "r0" {
 					f.deliver(r)
 				}
@@ -344,7 +340,7 @@ func TestInvokeContext(t *testing.T) {
 }
 
 func TestReconfigure(t *testing.T) {
-	c, fake := newClient(t, func(f *fakeNet, to string, m protocol.Message) {
+	c, fake := newClient(t, func(f *fakeNet, to string, m message.Message) {
 		switch to {
 		case "r1":
 			if r, ok := replyTo(m, 1, "ok"); ok {
@@ -377,11 +373,11 @@ func TestReconfigure(t *testing.T) {
 	if len(sent) != 6 {
 		t.Fatalf("sent %d messages, want 6", len(sent))
 	}
-	rc, ok := sent[4].m.(protocol.Reconfiguration)
+	rc, ok := sent[4].m.(message.Reconfiguration)
 	if sent[4].to != "r1" || !ok || rc.Epoch != 0 || rc.RequestNum != 2 || !slices.Equal(rc.Config, newConfig) {
 		t.Fatalf("sent %#v to %s, want Reconfiguration epoch 0 num 2 to r1", sent[4].m, sent[4].to)
 	}
-	ce, ok := sent[5].m.(protocol.CheckEpoch)
+	ce, ok := sent[5].m.(message.CheckEpoch)
 	if sent[5].to != "n0" || !ok || ce.Epoch != 1 || ce.RequestNum != 3 {
 		t.Fatalf("sent %#v to %s, want CheckEpoch epoch 1 num 3 to n0", sent[5].m, sent[5].to)
 	}
@@ -390,10 +386,10 @@ func TestReconfigure(t *testing.T) {
 func TestReconfigureKeepsNewerEpoch(t *testing.T) {
 	newer := []string{"x0", "x1", "x2"}
 	adopted := false
-	c, _ := newClient(t, func(f *fakeNet, to string, m protocol.Message) {
-		if _, ok := m.(protocol.Reconfiguration); ok && !adopted {
+	c, _ := newClient(t, func(f *fakeNet, to string, m message.Message) {
+		if _, ok := m.(message.Reconfiguration); ok && !adopted {
 			adopted = true
-			f.deliver(protocol.NewEpoch{Epoch: 2, View: 3, Config: newer})
+			f.deliver(message.NewEpoch{Epoch: 2, View: 3, Config: newer})
 		}
 		answerAll(f, to, m)
 	}, testConfig)
@@ -454,7 +450,7 @@ func TestRequestNumbersIncrease(t *testing.T) {
 
 func TestCloseUnblocksInvoke(t *testing.T) {
 	sent := make(chan struct{}, 1)
-	c, fake := newClient(t, func(*fakeNet, string, protocol.Message) {
+	c, fake := newClient(t, func(*fakeNet, string, message.Message) {
 		select {
 		case sent <- struct{}{}:
 		default:

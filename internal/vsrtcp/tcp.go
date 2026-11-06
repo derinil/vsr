@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/derinil/vsr/internal/protocol"
 	"github.com/derinil/vsr/internal/vsrstatus"
+	"github.com/derinil/vsr/message"
 )
 
 const (
@@ -68,8 +68,8 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Handler receives an inbound message and returns an error when it is malformed.
-type Handler = func(msg []byte) error
+// Handler receives inbound messages.
+type Handler = func(m message.Message)
 
 // Transport sends messages best-effort, dropping them when queues are full.
 type Transport struct {
@@ -189,9 +189,10 @@ func (t *Transport) Addr() net.Addr {
 	return t.ln.Addr()
 }
 
-// Send queues msg for the replica at to, dialing it if needed.
-func (t *Transport) Send(to string, msg []byte) {
-	if len(msg) > t.opts.MaxFrameSize {
+// Send queues m for the replica at to, dialing it if needed.
+func (t *Transport) Send(to string, m message.Message) {
+	b := t.frame(m)
+	if b == nil {
 		return
 	}
 	t.mu.Lock()
@@ -205,7 +206,7 @@ func (t *Transport) Send(to string, msg []byte) {
 		t.peers[to] = p
 		t.wg.Go(func() { t.runPeer(p) })
 	}
-	if !enqueue(p.out, msg) {
+	if !enqueue(p.out, b) {
 		p.dropped.Add(1)
 	}
 }
@@ -222,9 +223,10 @@ func (t *Transport) Peers() []vsrstatus.Peer {
 	return out
 }
 
-// Reply sends msg to a client over the connection it last sent from.
-func (t *Transport) Reply(client uint64, msg []byte) {
-	if len(msg) > t.opts.MaxFrameSize {
+// Reply sends m to a client over the connection it last sent from.
+func (t *Transport) Reply(client uint64, m message.Message) {
+	b := t.frame(m)
+	if b == nil {
 		return
 	}
 	t.mu.Lock()
@@ -233,7 +235,7 @@ func (t *Transport) Reply(client uint64, msg []byte) {
 		return
 	}
 	if c := t.routes[client]; c != nil {
-		enqueue(c.out, msg)
+		enqueue(c.out, b)
 	}
 }
 
@@ -259,6 +261,16 @@ func (t *Transport) Close() error {
 	}
 	t.wg.Wait()
 	return err
+}
+
+func (t *Transport) frame(m message.Message) []byte {
+	b := message.Append(make([]byte, frameHeaderSize, 64), m)
+	n := len(b) - frameHeaderSize
+	if n > t.opts.MaxFrameSize {
+		return nil
+	}
+	binary.BigEndian.PutUint32(b, uint32(n))
+	return b
 }
 
 func enqueue(out chan<- []byte, b []byte) bool {
@@ -365,18 +377,22 @@ func (t *Transport) readLoop(c *conn, inbound bool) {
 			return
 		}
 		buf = frame
-		if inbound {
-			if id, ok := protocol.PeekClient(frame); ok {
-				t.route(id, c)
-			}
-		}
-		if t.h(frame) != nil {
+		m, err := message.Decode(frame)
+		if err != nil {
 			return
 		}
+		if inbound {
+			t.route(m, c)
+		}
+		t.h(m)
 	}
 }
 
-func (t *Transport) route(id uint64, c *conn) {
+func (t *Transport) route(m message.Message, c *conn) {
+	id, ok := message.ClientOf(m)
+	if !ok {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, live := t.conns[c]; live {
@@ -390,7 +406,7 @@ func (t *Transport) writeLoop(c *conn) {
 		select {
 		case b := <-c.out:
 			c.nc.SetWriteDeadline(time.Now().Add(t.opts.WriteTimeout))
-			if err := writeFrame(w, b); err != nil {
+			if _, err := w.Write(b); err != nil {
 				return
 			}
 		case <-c.quit:
@@ -398,7 +414,7 @@ func (t *Transport) writeLoop(c *conn) {
 		}
 		written := 1
 		for pending := len(c.out); pending > 0; pending-- {
-			if err := writeFrame(w, <-c.out); err != nil {
+			if _, err := w.Write(<-c.out); err != nil {
 				return
 			}
 			written++
@@ -410,16 +426,6 @@ func (t *Transport) writeLoop(c *conn) {
 			c.peer.sent.Add(uint64(written))
 		}
 	}
-}
-
-func writeFrame(w *bufio.Writer, msg []byte) error {
-	var hdr [frameHeaderSize]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(msg)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err := w.Write(msg)
-	return err
 }
 
 func readFrame(r io.Reader, buf []byte, maxSize int) ([]byte, error) {

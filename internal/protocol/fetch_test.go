@@ -3,6 +3,8 @@ package protocol
 import (
 	"slices"
 	"testing"
+
+	"github.com/derinil/vsr/message"
 )
 
 func distinctPages(state []byte, pageSize int) int {
@@ -171,9 +173,9 @@ func TestCheckpointSourceTakesNewerCheckpoint(t *testing.T) {
 	}
 	c.heal()
 	c.filter = func(e envelope) bool {
-		return e.to == 2 && (isMsg[MerkleNodes](e) || isMsg[Pages](e) || isMsg[Prepare](e) || isMsg[Commit](e))
+		return e.to == 2 && (isMsg[message.MerkleNodes](e) || isMsg[message.Pages](e) || isMsg[message.Prepare](e) || isMsg[message.Commit](e))
 	}
-	c.replicas[2].Step(Commit{CommitNum: 12})
+	c.replicas[2].Step(message.Commit{CommitNum: 12})
 	c.settle()
 	first := c.replicas[0].Checkpoint().OpNum
 	for range 16 {

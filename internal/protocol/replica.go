@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
+
+	"github.com/derinil/vsr/message"
 )
 
 // ErrInvalidOptions is returned by NewReplica for invalid Options.
@@ -89,7 +91,7 @@ type Replica struct {
 	lastNormalView uint64
 	status         Status
 	base           uint64
-	log            []Entry
+	log            []message.Entry
 	ckpts          []checkpoint
 	fetch          *fetch
 	commitNum      uint64
@@ -100,11 +102,11 @@ type Replica struct {
 	acked   []uint64
 	ackBuf  []uint64
 	svc     map[int]bool
-	dvcs    map[int]DoViewChange
+	dvcs    map[int]message.DoViewChange
 	dvcSent bool
 
 	nonce     uint64
-	responses map[int]RecoveryResponse
+	responses map[int]message.RecoveryResponse
 
 	stateReq    bool
 	stateTarget uint64
@@ -147,8 +149,8 @@ func NewReplica(o Options) (*Replica, error) {
 		acked:              make([]uint64, n),
 		ackBuf:             make([]uint64, 0, n),
 		svc:                make(map[int]bool),
-		dvcs:               make(map[int]DoViewChange),
-		responses:          make(map[int]RecoveryResponse),
+		dvcs:               make(map[int]message.DoViewChange),
+		responses:          make(map[int]message.RecoveryResponse),
 	}
 	if o.Checkpoint != nil {
 		if err := r.restoreCheckpoint(*o.Checkpoint); err != nil {
@@ -260,7 +262,7 @@ func (r *Replica) Index() int { return r.index }
 func (r *Replica) IsPrimary() bool { return r.status == StatusNormal && r.isLeader() }
 
 // Log returns the replica's log; callers must not modify it.
-func (r *Replica) Log() []Entry           { return slices.Clip(r.log) }
+func (r *Replica) Log() []message.Entry   { return slices.Clip(r.log) }
 func (r *Replica) isLeader() bool         { return r.primaryOf(r.view) == r.index }
 func (r *Replica) primaryOf(v uint64) int { return int(v % uint64(len(r.config))) }
 
@@ -269,52 +271,52 @@ func (r *Replica) validReplica(i int) bool {
 }
 
 // Step processes one inbound message.
-func (r *Replica) Step(m Message) {
+func (r *Replica) Step(m message.Message) {
 	if !r.admit(m) {
 		return
 	}
 	switch m := m.(type) {
-	case Request:
+	case message.Request:
 		r.onRequest(m)
-	case Reconfiguration:
+	case message.Reconfiguration:
 		r.onReconfiguration(m)
-	case CheckEpoch:
+	case message.CheckEpoch:
 		r.onCheckEpoch(m)
-	case RecoveryResponse:
+	case message.RecoveryResponse:
 		r.onRecoveryResponse(m)
-	case Prepare:
+	case message.Prepare:
 		r.onPrepare(m)
-	case PrepareOK:
+	case message.PrepareOK:
 		r.onPrepareOK(m)
-	case Commit:
+	case message.Commit:
 		r.onCommit(m)
-	case StartViewChange:
+	case message.StartViewChange:
 		r.onStartViewChange(m)
-	case DoViewChange:
+	case message.DoViewChange:
 		r.onDoViewChange(m)
-	case StartView:
+	case message.StartView:
 		r.onStartView(m)
-	case Recovery:
+	case message.Recovery:
 		r.onRecovery(m)
-	case GetState:
+	case message.GetState:
 		r.onGetState(m)
-	case NewState:
+	case message.NewState:
 		r.onNewState(m)
-	case StartEpoch:
+	case message.StartEpoch:
 		r.onStartEpoch(m)
-	case EpochStarted:
+	case message.EpochStarted:
 		r.onEpochStarted(m)
-	case GetCheckpoint:
+	case message.GetCheckpoint:
 		r.onGetCheckpoint(m)
-	case CheckpointInfo:
+	case message.CheckpointInfo:
 		r.onCheckpointInfo(m)
-	case GetMerkle:
+	case message.GetMerkle:
 		r.onGetMerkle(m)
-	case MerkleNodes:
+	case message.MerkleNodes:
 		r.onMerkleNodes(m)
-	case GetPages:
+	case message.GetPages:
 		r.onGetPages(m)
-	case Pages:
+	case message.Pages:
 		r.onPages(m)
 	}
 }
@@ -343,9 +345,9 @@ func (r *Replica) resend() {
 	}
 	switch r.status {
 	case StatusRecovering:
-		r.broadcast(Recovery{Epoch: r.epoch, Nonce: r.nonce, Replica: r.index, CheckpointNum: r.base})
+		r.broadcast(message.Recovery{Epoch: r.epoch, Nonce: r.nonce, Replica: r.index, CheckpointNum: r.base})
 	case StatusViewChange:
-		r.broadcast(StartViewChange{Epoch: r.epoch, View: r.view, Replica: r.index})
+		r.broadcast(message.StartViewChange{Epoch: r.epoch, View: r.view, Replica: r.index})
 		if r.dvcSent {
 			r.send(r.primaryOf(r.view), r.doViewChange())
 		}
@@ -365,11 +367,11 @@ func (r *Replica) resetTimer() {
 	r.deadline = r.now + r.viewChangeTicks + r.rng.IntN(r.viewChangeTicks)
 }
 
-func (r *Replica) send(to int, m Message) {
+func (r *Replica) send(to int, m message.Message) {
 	r.outbox.Send(r.config[to], m)
 }
 
-func (r *Replica) broadcast(m Message) {
+func (r *Replica) broadcast(m message.Message) {
 	for i := range r.config {
 		if i != r.index {
 			r.send(i, m)
@@ -378,7 +380,7 @@ func (r *Replica) broadcast(m Message) {
 }
 
 func (r *Replica) reply(client, req uint64, result []byte) {
-	r.outbox.Reply(client, Reply{Epoch: r.epoch, View: r.view, ClientID: client, RequestNum: req, Result: result})
+	r.outbox.Reply(client, message.Reply{Epoch: r.epoch, View: r.view, ClientID: client, RequestNum: req, Result: result})
 }
 
 func (r *Replica) enterNormal(v uint64) {
@@ -402,15 +404,15 @@ func (r *Replica) rebuildInflight() {
 	}
 }
 
-func (r *Replica) entry(n uint64) Entry {
+func (r *Replica) entry(n uint64) message.Entry {
 	return r.log[n-r.base-1]
 }
 
-func (r *Replica) entriesAfter(n uint64) []Entry {
+func (r *Replica) entriesAfter(n uint64) []message.Entry {
 	return r.log[min(max(n, r.base)-r.base, uint64(len(r.log))):]
 }
 
-func (r *Replica) appendEntry(e Entry) {
+func (r *Replica) appendEntry(e message.Entry) {
 	r.log = append(r.log, e)
 	r.inflight[e.ClientID] = e.RequestNum
 }

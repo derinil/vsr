@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/derinil/vsr/internal/protocol"
+	"github.com/derinil/vsr/message"
 )
 
 const (
@@ -83,7 +84,7 @@ type Replica struct {
 	opts         ReplicaOptions
 	log          *slog.Logger
 	started      time.Time
-	inbox        chan protocol.Message
+	inbox        chan message.Message
 	transport    Transport
 	peers        peerLister
 	replica      *protocol.Replica
@@ -133,7 +134,7 @@ func NewReplica(o ReplicaOptions) (*Replica, error) {
 		opts:       o,
 		log:        o.Logger.With("addr", o.Addr),
 		started:    time.Now(),
-		inbox:      make(chan protocol.Message, o.InboxSize),
+		inbox:      make(chan message.Message, o.InboxSize),
 		savedEpoch: st.Epoch,
 	}
 	if found && len(o.Config) > 0 && !slices.Equal(st.Config, o.Config) {
@@ -149,9 +150,9 @@ func NewReplica(o ReplicaOptions) (*Replica, error) {
 			s.checkpointed = c.OpNum
 		}
 	}
-	s.transport = o.NewTransport(handler(s.deliver))
+	s.transport = o.NewTransport(s.deliver)
 	s.peers, _ = s.transport.(peerLister)
-	ro.Outbox = outbox{s.transport}
+	ro.Outbox = s.transport
 	r, err := protocol.NewReplica(ro)
 	if err != nil {
 		s.transport.Close()
@@ -254,7 +255,7 @@ func (s *Replica) State() State {
 	return s.published.Load().State
 }
 
-func (s *Replica) deliver(m protocol.Message) {
+func (s *Replica) deliver(m message.Message) {
 	select {
 	case s.inbox <- m:
 		s.received.Add(1)
@@ -263,7 +264,7 @@ func (s *Replica) deliver(m protocol.Message) {
 	}
 }
 
-func (s *Replica) step(first protocol.Message) {
+func (s *Replica) step(first message.Message) {
 	s.replica.Step(first)
 	for range maxBurst {
 		select {

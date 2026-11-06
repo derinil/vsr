@@ -1,6 +1,10 @@
 package protocol
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/derinil/vsr/message"
+)
 
 func (r *Replica) startViewChange(v uint64) {
 	r.view = v
@@ -10,7 +14,7 @@ func (r *Replica) startViewChange(v uint64) {
 	r.dvcSent = false
 	r.stateReq = false
 	r.stateTarget = 0
-	r.broadcast(StartViewChange{Epoch: r.epoch, View: v, Replica: r.index})
+	r.broadcast(message.StartViewChange{Epoch: r.epoch, View: v, Replica: r.index})
 	if r.isLeader() {
 		r.dvcs[r.index] = r.doViewChange()
 	}
@@ -29,7 +33,7 @@ func (r *Replica) joinViewChange(v uint64) bool {
 	return false
 }
 
-func (r *Replica) onStartViewChange(m StartViewChange) {
+func (r *Replica) onStartViewChange(m message.StartViewChange) {
 	if !r.validReplica(m.Replica) {
 		return
 	}
@@ -56,7 +60,7 @@ func (r *Replica) trySendDVC() {
 	r.send(r.primaryOf(r.view), r.doViewChange())
 }
 
-func (r *Replica) onDoViewChange(m DoViewChange) {
+func (r *Replica) onDoViewChange(m message.DoViewChange) {
 	if !r.validReplica(m.Replica) {
 		return
 	}
@@ -81,7 +85,7 @@ func (r *Replica) tryBecomePrimary() {
 }
 
 func (r *Replica) becomePrimary() {
-	var best *DoViewChange
+	var best *message.DoViewChange
 	var commit uint64
 	for i := range r.config {
 		d, ok := r.dvcs[i]
@@ -99,27 +103,27 @@ func (r *Replica) becomePrimary() {
 	r.commitUpTo(commit)
 }
 
-func moreRecent(a, b DoViewChange) bool {
+func moreRecent(a, b message.DoViewChange) bool {
 	if a.LastNormalView != b.LastNormalView {
 		return a.LastNormalView > b.LastNormalView
 	}
 	return a.OpNum > b.OpNum
 }
 
-func (r *Replica) onStartView(m StartView) {
+func (r *Replica) onStartView(m message.StartView) {
 	if m.View < r.view || (m.View == r.view && r.status != StatusViewChange) {
 		return
 	}
 	r.adoptLog(m.LogBase, m.Log, r.config[r.primaryOf(m.View)])
 	r.enterNormal(m.View)
 	if r.OpNum() > m.CommitNum {
-		r.send(r.primaryOf(m.View), PrepareOK{Epoch: r.epoch, View: m.View, OpNum: r.OpNum(), Replica: r.index})
+		r.send(r.primaryOf(m.View), message.PrepareOK{Epoch: r.epoch, View: m.View, OpNum: r.OpNum(), Replica: r.index})
 	}
 	r.commitUpTo(m.CommitNum)
 }
 
-func (r *Replica) doViewChange() DoViewChange {
-	return DoViewChange{
+func (r *Replica) doViewChange() message.DoViewChange {
+	return message.DoViewChange{
 		Epoch:          r.epoch,
 		View:           r.view,
 		LastNormalView: r.lastNormalView,
@@ -131,8 +135,8 @@ func (r *Replica) doViewChange() DoViewChange {
 	}
 }
 
-func (r *Replica) startViewMsg(commit uint64) StartView {
-	return StartView{
+func (r *Replica) startViewMsg(commit uint64) message.StartView {
+	return message.StartView{
 		Epoch:     r.epoch,
 		View:      r.view,
 		OpNum:     r.OpNum(),

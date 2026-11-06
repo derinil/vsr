@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/derinil/vsr/message"
 )
 
 func TestCheckpointRoundTrip(t *testing.T) {
@@ -50,8 +52,8 @@ func TestDecodeCheckpointMalformed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := DecodeCheckpoint(tc.in); !errors.Is(err, ErrMalformed) {
-				t.Fatalf("err = %v, want ErrMalformed", err)
+			if _, err := DecodeCheckpoint(tc.in); !errors.Is(err, message.ErrMalformed) {
+				t.Fatalf("err = %v, want message.ErrMalformed", err)
 			}
 		})
 	}
@@ -60,7 +62,7 @@ func TestDecodeCheckpointMalformed(t *testing.T) {
 func TestDecodeCheckpointTruncated(t *testing.T) {
 	enc := AppendCheckpoint(nil, Checkpoint{OpNum: 300, State: testData(20), Clients: []byte{7, 8}})
 	for i := range enc {
-		if _, err := DecodeCheckpoint(enc[:i]); !errors.Is(err, ErrMalformed) {
+		if _, err := DecodeCheckpoint(enc[:i]); !errors.Is(err, message.ErrMalformed) {
 			t.Fatalf("prefix %d/%d: err = %v", i, len(enc), err)
 		}
 	}
@@ -120,8 +122,8 @@ func TestDecodeClientsMalformed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := decodeClients(tc.in); !errors.Is(err, ErrMalformed) {
-				t.Fatalf("err = %v, want ErrMalformed", err)
+			if _, err := decodeClients(tc.in); !errors.Is(err, message.ErrMalformed) {
+				t.Fatalf("err = %v, want message.ErrMalformed", err)
 			}
 		})
 	}
@@ -221,7 +223,7 @@ func TestCollectGarbage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &Replica{checkpointRetain: tc.retain, base: tc.base, commitNum: tc.commit}
 			for op := tc.base + 1; op <= tc.commit; op++ {
-				r.log = append(r.log, Entry{RequestNum: op})
+				r.log = append(r.log, message.Entry{RequestNum: op})
 			}
 			for _, n := range tc.held {
 				r.ckpts = append(r.ckpts, newCheckpoint(Checkpoint{OpNum: n}, testPageSize))

@@ -1,6 +1,10 @@
 package protocol
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/derinil/vsr/message"
+)
 
 func (r *Replica) requestState(target uint64) {
 	if target <= r.OpNum() {
@@ -15,7 +19,7 @@ func (r *Replica) requestState(target uint64) {
 }
 
 func (r *Replica) sendGetState() {
-	r.send(r.primaryOf(r.view), GetState{Epoch: r.epoch, View: r.view, OpNum: r.OpNum(), Replica: r.index})
+	r.send(r.primaryOf(r.view), message.GetState{Epoch: r.epoch, View: r.view, OpNum: r.OpNum(), Replica: r.index})
 }
 
 func (r *Replica) resendGetState() {
@@ -29,11 +33,11 @@ func (r *Replica) resendGetState() {
 	r.sendGetState()
 }
 
-func (r *Replica) onGetState(m GetState) {
+func (r *Replica) onGetState(m message.GetState) {
 	if m.OpNum < r.epochStart && validIndex(m.Replica, len(r.config)) && r.commitNum >= max(r.epochStart, r.base) {
 		lb := max(m.OpNum, r.base)
 		hi := max(r.epochStart, lb)
-		r.send(m.Replica, NewState{
+		r.send(m.Replica, message.NewState{
 			Epoch:     r.epoch,
 			View:      r.view,
 			OpNum:     hi,
@@ -47,7 +51,7 @@ func (r *Replica) onGetState(m GetState) {
 		return
 	}
 	lb := max(m.OpNum, r.base)
-	r.send(m.Replica, NewState{
+	r.send(m.Replica, message.NewState{
 		Epoch:     r.epoch,
 		View:      r.view,
 		OpNum:     r.OpNum(),
@@ -57,7 +61,7 @@ func (r *Replica) onGetState(m GetState) {
 	})
 }
 
-func (r *Replica) onNewState(m NewState) {
+func (r *Replica) onNewState(m message.NewState) {
 	if r.status == StatusTransitioning {
 		if m.OpNum >= r.epochStart && r.stateFrom != "" {
 			r.appendState(m, r.stateFrom)
@@ -71,11 +75,11 @@ func (r *Replica) onNewState(m NewState) {
 		return
 	}
 	r.stateReq = false
-	r.send(r.primaryOf(r.view), PrepareOK{Epoch: r.epoch, View: r.view, OpNum: r.OpNum(), Replica: r.index})
+	r.send(r.primaryOf(r.view), message.PrepareOK{Epoch: r.epoch, View: r.view, OpNum: r.OpNum(), Replica: r.index})
 	r.commitUpTo(m.CommitNum)
 }
 
-func (r *Replica) appendState(m NewState, from string) bool {
+func (r *Replica) appendState(m message.NewState, from string) bool {
 	if m.OpNum <= r.OpNum() || m.LogBase+uint64(len(m.Log)) != m.OpNum {
 		return false
 	}
@@ -89,7 +93,7 @@ func (r *Replica) appendState(m NewState, from string) bool {
 	return true
 }
 
-func (r *Replica) adoptLog(base uint64, entries []Entry, from string) {
+func (r *Replica) adoptLog(base uint64, entries []message.Entry, from string) {
 	switch {
 	case base <= r.base:
 		r.log = slices.Clone(entries[min(r.base-base, uint64(len(entries))):])

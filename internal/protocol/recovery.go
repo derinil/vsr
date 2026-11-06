@@ -1,12 +1,16 @@
 package protocol
 
-import "slices"
+import (
+	"slices"
 
-func (r *Replica) onRecovery(m Recovery) {
+	"github.com/derinil/vsr/message"
+)
+
+func (r *Replica) onRecovery(m message.Recovery) {
 	if r.status != StatusNormal || !r.validReplica(m.Replica) {
 		return
 	}
-	resp := RecoveryResponse{Epoch: r.epoch, View: r.view, Nonce: m.Nonce, Replica: r.index, EpochStart: r.epochStart}
+	resp := message.RecoveryResponse{Epoch: r.epoch, View: r.view, Nonce: m.Nonce, Replica: r.index, EpochStart: r.epochStart}
 	if r.IsPrimary() {
 		lb := max(m.CheckpointNum, r.base)
 		resp.HasLog = true
@@ -18,7 +22,7 @@ func (r *Replica) onRecovery(m Recovery) {
 	r.send(m.Replica, resp)
 }
 
-func (r *Replica) onRecoveryResponse(m RecoveryResponse) {
+func (r *Replica) onRecoveryResponse(m message.RecoveryResponse) {
 	if m.Nonce != r.nonce || !r.validReplica(m.Replica) {
 		return
 	}

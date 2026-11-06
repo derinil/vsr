@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/derinil/vsr/internal/protocol"
+	"github.com/derinil/vsr/message"
 )
 
 const defaultRequestTimeout = 500 * time.Millisecond
@@ -38,7 +38,7 @@ type Client struct {
 	transport Transport
 
 	sem       chan struct{}
-	reply     chan protocol.Reply
+	reply     chan message.Reply
 	wake      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
@@ -51,7 +51,7 @@ type Client struct {
 	waiting    bool
 }
 
-type buildFunc func(epoch, requestNum uint64) protocol.Message
+type buildFunc func(epoch, requestNum uint64) message.Message
 
 // NewClient returns a Client for o.Config.
 func NewClient(o ClientOptions) (*Client, error) {
@@ -80,11 +80,11 @@ func NewClient(o ClientOptions) (*Client, error) {
 		timeout: timeout,
 		config:  slices.Clone(o.Config),
 		sem:     make(chan struct{}, 1),
-		reply:   make(chan protocol.Reply, 1),
+		reply:   make(chan message.Reply, 1),
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
-	c.transport = o.NewTransport(handler(c.handle))
+	c.transport = o.NewTransport(c.handle)
 	return c, nil
 }
 
@@ -94,8 +94,8 @@ func (c *Client) Invoke(ctx context.Context, op []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer c.release()
-	r, err := c.roundTrip(ctx, func(epoch, n uint64) protocol.Message {
-		return protocol.Request{Epoch: epoch, ClientID: c.id, RequestNum: n, Op: op}
+	r, err := c.roundTrip(ctx, func(epoch, n uint64) message.Message {
+		return message.Request{Epoch: epoch, ClientID: c.id, RequestNum: n, Op: op}
 	})
 	if err != nil {
 		return nil, err
@@ -119,8 +119,8 @@ func (c *Client) Reconfigure(ctx context.Context, config []string) error {
 
 	cfg := slices.Clone(config)
 	start := c.Epoch()
-	if _, err := c.roundTrip(ctx, func(epoch, n uint64) protocol.Message {
-		return protocol.Reconfiguration{Epoch: epoch, ClientID: c.id, RequestNum: n, Config: cfg}
+	if _, err := c.roundTrip(ctx, func(epoch, n uint64) message.Message {
+		return message.Reconfiguration{Epoch: epoch, ClientID: c.id, RequestNum: n, Config: cfg}
 	}); err != nil {
 		return err
 	}
@@ -131,8 +131,8 @@ func (c *Client) Reconfigure(ctx context.Context, config []string) error {
 	}
 	c.mu.Unlock()
 
-	_, err := c.roundTrip(ctx, func(epoch, n uint64) protocol.Message {
-		return protocol.CheckEpoch{Epoch: epoch, ClientID: c.id, RequestNum: n}
+	_, err := c.roundTrip(ctx, func(epoch, n uint64) message.Message {
+		return message.CheckEpoch{Epoch: epoch, ClientID: c.id, RequestNum: n}
 	})
 	return err
 }
@@ -173,9 +173,9 @@ func (c *Client) Close() error {
 	return err
 }
 
-func (c *Client) handle(m protocol.Message) {
+func (c *Client) handle(m message.Message) {
 	switch m := m.(type) {
-	case protocol.Reply:
+	case message.Reply:
 		if m.ClientID != c.id {
 			return
 		}
@@ -190,7 +190,7 @@ func (c *Client) handle(m protocol.Message) {
 			default:
 			}
 		}
-	case protocol.NewEpoch:
+	case message.NewEpoch:
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if m.Epoch <= c.epoch || len(m.Config) == 0 {
@@ -206,7 +206,7 @@ func (c *Client) handle(m protocol.Message) {
 	}
 }
 
-func (c *Client) roundTrip(ctx context.Context, build buildFunc) (protocol.Reply, error) {
+func (c *Client) roundTrip(ctx context.Context, build buildFunc) (message.Reply, error) {
 	n := c.begin()
 	defer c.end()
 
@@ -223,9 +223,9 @@ func (c *Client) roundTrip(ctx context.Context, build buildFunc) (protocol.Reply
 			c.transmit(build, n, true)
 			timer.Reset(c.timeout)
 		case <-ctx.Done():
-			return protocol.Reply{}, ctx.Err()
+			return message.Reply{}, ctx.Err()
 		case <-c.done:
-			return protocol.Reply{}, ErrClosed
+			return message.Reply{}, ErrClosed
 		}
 	}
 }
@@ -237,13 +237,12 @@ func (c *Client) transmit(build buildFunc, n uint64, all bool) {
 	primary := config[c.view%uint64(len(config))]
 	c.mu.Unlock()
 
-	b := encode(m)
 	if !all {
-		c.transport.Send(primary, b)
+		c.transport.Send(primary, m)
 		return
 	}
 	for _, addr := range config {
-		c.transport.Send(addr, b)
+		c.transport.Send(addr, m)
 	}
 }
 

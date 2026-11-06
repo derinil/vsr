@@ -1,6 +1,10 @@
 package protocol
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/derinil/vsr/message"
+)
 
 func (r *Replica) listening() bool {
 	return !r.joining && (r.status == StatusNormal || r.status == StatusViewChange || r.status == StatusTransitioning)
@@ -10,45 +14,45 @@ func (r *Replica) active() bool {
 	return r.status == StatusNormal || r.status == StatusViewChange
 }
 
-func (r *Replica) admit(m Message) bool {
+func (r *Replica) admit(m message.Message) bool {
 	switch m := m.(type) {
-	case Request:
+	case message.Request:
 		return r.admitClient(m.Epoch, m.ClientID)
-	case Reconfiguration:
+	case message.Reconfiguration:
 		return r.admitClient(m.Epoch, m.ClientID)
-	case CheckEpoch:
+	case message.CheckEpoch:
 		return r.admitClient(m.Epoch, m.ClientID)
-	case StartEpoch:
+	case message.StartEpoch:
 		return r.admitStartEpoch(m)
-	case RecoveryResponse:
+	case message.RecoveryResponse:
 		return r.status == StatusRecovering && m.Epoch == r.epoch
-	case NewState:
+	case message.NewState:
 		return m.Epoch == r.epoch && r.listening()
-	case Prepare:
+	case message.Prepare:
 		return r.admitPrimary(m.Epoch, m.View, r.active())
-	case Commit:
+	case message.Commit:
 		return r.admitPrimary(m.Epoch, m.View, r.active())
-	case StartView:
+	case message.StartView:
 		return m.Epoch == r.epoch && r.active()
-	case GetState:
+	case message.GetState:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.listening())
-	case EpochStarted:
+	case message.EpochStarted:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.listening())
-	case PrepareOK:
+	case message.PrepareOK:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.active())
-	case StartViewChange:
+	case message.StartViewChange:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.active())
-	case DoViewChange:
+	case message.DoViewChange:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.active())
-	case Recovery:
+	case message.Recovery:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.active())
-	case GetCheckpoint, GetMerkle, GetPages:
+	case message.GetCheckpoint, message.GetMerkle, message.GetPages:
 		return r.status != StatusShutdown
-	case CheckpointInfo:
+	case message.CheckpointInfo:
 		return r.fetch != nil && m.Epoch == r.epoch
-	case MerkleNodes:
+	case message.MerkleNodes:
 		return r.fetchingAt(m.OpNum)
-	case Pages:
+	case message.Pages:
 		return r.fetchingAt(m.OpNum)
 	}
 	return false
@@ -56,13 +60,13 @@ func (r *Replica) admit(m Message) bool {
 
 func (r *Replica) admitClient(epoch, client uint64) bool {
 	if epoch < r.epoch && (r.status == StatusShutdown || r.listening()) {
-		r.outbox.Reply(client, NewEpoch{Epoch: r.epoch, View: r.view, Config: r.config})
+		r.outbox.Reply(client, message.NewEpoch{Epoch: r.epoch, View: r.view, Config: r.config})
 		return false
 	}
 	return epoch == r.epoch && r.status == StatusNormal
 }
 
-func (r *Replica) admitStartEpoch(m StartEpoch) bool {
+func (r *Replica) admitStartEpoch(m message.StartEpoch) bool {
 	switch {
 	case r.status == StatusShutdown:
 		return false
@@ -106,11 +110,11 @@ func (r *Replica) member() bool {
 	return r.index >= 0 || slices.Contains(r.oldConfig, r.addr)
 }
 
-func (r *Replica) startEpoch() StartEpoch {
-	return StartEpoch{Epoch: r.epoch, OpNum: r.epochStart, OldConfig: r.oldConfig, NewConfig: r.config, From: r.addr}
+func (r *Replica) startEpoch() message.StartEpoch {
+	return message.StartEpoch{Epoch: r.epoch, OpNum: r.epochStart, OldConfig: r.oldConfig, NewConfig: r.config, From: r.addr}
 }
 
-func (r *Replica) propose(client, req uint64, e Entry) {
+func (r *Replica) propose(client, req uint64, e message.Entry) {
 	if !r.IsPrimary() || r.fetch != nil || r.pendingReconfig() {
 		return
 	}
@@ -133,10 +137,10 @@ func (r *Replica) propose(client, req uint64, e Entry) {
 
 func (r *Replica) pendingReconfig() bool {
 	n := r.OpNum()
-	return n > r.epochStart && n > r.base && r.entry(n).Kind == EntryReconfig
+	return n > r.epochStart && n > r.base && r.entry(n).Kind == message.EntryReconfig
 }
 
-func (r *Replica) onReconfiguration(m Reconfiguration) {
+func (r *Replica) onReconfiguration(m message.Reconfiguration) {
 	if !validConfig(m.Config) {
 		return
 	}
@@ -144,7 +148,7 @@ func (r *Replica) onReconfiguration(m Reconfiguration) {
 		r.replayReconfig(m.ClientID, m.RequestNum)
 		return
 	}
-	r.propose(m.ClientID, m.RequestNum, Entry{Kind: EntryReconfig, ClientID: m.ClientID, RequestNum: m.RequestNum, Config: slices.Clone(m.Config)})
+	r.propose(m.ClientID, m.RequestNum, message.Entry{Kind: message.EntryReconfig, ClientID: m.ClientID, RequestNum: m.RequestNum, Config: slices.Clone(m.Config)})
 }
 
 func (r *Replica) replayReconfig(client, req uint64) {
@@ -153,8 +157,8 @@ func (r *Replica) replayReconfig(client, req uint64) {
 	}
 }
 
-func (r *Replica) onCheckEpoch(m CheckEpoch) {
-	r.propose(m.ClientID, m.RequestNum, Entry{Kind: EntryCheckEpoch, ClientID: m.ClientID, RequestNum: m.RequestNum})
+func (r *Replica) onCheckEpoch(m message.CheckEpoch) {
+	r.propose(m.ClientID, m.RequestNum, message.Entry{Kind: message.EntryCheckEpoch, ClientID: m.ClientID, RequestNum: m.RequestNum})
 }
 
 func validConfig(config []string) bool {
@@ -167,15 +171,15 @@ func validIndex(i, n int) bool {
 	return i >= 0 && i < n
 }
 
-func (r *Replica) switchEpoch(e Entry) {
+func (r *Replica) switchEpoch(e message.Entry) {
 	n := r.commitNum
 	old := r.config
 	if r.IsPrimary() {
 		r.reply(e.ClientID, e.RequestNum, nil)
-		r.broadcast(Commit{Epoch: r.epoch, View: r.view, CommitNum: n})
+		r.broadcast(message.Commit{Epoch: r.epoch, View: r.view, CommitNum: n})
 		for _, addr := range e.Config {
 			if !slices.Contains(old, addr) {
-				r.outbox.Send(addr, StartEpoch{Epoch: r.epoch + 1, OpNum: n, OldConfig: old, NewConfig: e.Config, From: r.addr})
+				r.outbox.Send(addr, message.StartEpoch{Epoch: r.epoch + 1, OpNum: n, OldConfig: old, NewConfig: e.Config, From: r.addr})
 			}
 		}
 	}
@@ -222,7 +226,7 @@ func (r *Replica) tryFinishTransition() {
 		return
 	}
 	r.enterNormal(0)
-	m := EpochStarted{Epoch: r.epoch, Replica: r.index}
+	m := message.EpochStarted{Epoch: r.epoch, Replica: r.index}
 	for _, addr := range r.config {
 		if addr != r.addr {
 			r.outbox.Send(addr, m)
@@ -241,7 +245,7 @@ func (r *Replica) requestEpochState() {
 		return
 	}
 	r.stateFrom = peers[r.catchUp%len(peers)]
-	r.outbox.Send(r.stateFrom, GetState{Epoch: r.epoch, OpNum: r.commitNum, Replica: r.index})
+	r.outbox.Send(r.stateFrom, message.GetState{Epoch: r.epoch, OpNum: r.commitNum, Replica: r.index})
 	r.catchUp++
 }
 
@@ -269,9 +273,9 @@ func (r *Replica) announceStart() {
 	}
 }
 
-func (r *Replica) onStartEpoch(m StartEpoch) {
+func (r *Replica) onStartEpoch(m message.StartEpoch) {
 	if m.Epoch == r.epoch {
-		r.outbox.Send(m.From, EpochStarted{Epoch: r.epoch, Replica: r.index})
+		r.outbox.Send(m.From, message.EpochStarted{Epoch: r.epoch, Replica: r.index})
 		return
 	}
 	if r.status == StatusRecovering {
@@ -281,7 +285,7 @@ func (r *Replica) onStartEpoch(m StartEpoch) {
 	r.enterEpoch(m.Epoch, m.OpNum, m.OldConfig, m.NewConfig)
 }
 
-func (r *Replica) rejoin(m StartEpoch) {
+func (r *Replica) rejoin(m message.StartEpoch) {
 	r.setEpoch(m.Epoch, m.OpNum, m.OldConfig, m.NewConfig)
 	if r.index < 0 {
 		r.status = StatusShutdown
@@ -290,7 +294,7 @@ func (r *Replica) rejoin(m StartEpoch) {
 	r.nonce = r.rng.Uint64()
 }
 
-func (r *Replica) onEpochStarted(m EpochStarted) {
+func (r *Replica) onEpochStarted(m message.EpochStarted) {
 	if !validIndex(m.Replica, len(r.config)) {
 		return
 	}

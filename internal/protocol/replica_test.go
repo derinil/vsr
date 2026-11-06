@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+
+	"github.com/derinil/vsr/message"
 )
 
 func TestNewReplicaValidation(t *testing.T) {
@@ -74,7 +76,7 @@ func TestDuplicateRequestReturnsCachedReply(t *testing.T) {
 	c.settle()
 	p := c.leader()
 	before := len(c.replies)
-	c.enqueue(envelope{from: -1, to: p, msg: Request{ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}})
+	c.enqueue(envelope{from: -1, to: p, msg: message.Request{ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}})
 	c.settle()
 	c.check()
 	if got := len(c.replies) - before; got != 1 {
@@ -94,7 +96,7 @@ func TestOldRequestDropped(t *testing.T) {
 	c.settle()
 	p := c.leader()
 	before := len(c.replies)
-	c.enqueue(envelope{from: -1, to: p, msg: Request{ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}})
+	c.enqueue(envelope{from: -1, to: p, msg: message.Request{ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}})
 	c.settle()
 	c.check()
 	if len(c.replies) != before {
@@ -107,7 +109,7 @@ func TestOldRequestDropped(t *testing.T) {
 
 func TestBackupIgnoresRequests(t *testing.T) {
 	c := newCluster(t, 3, 1)
-	c.enqueue(envelope{from: -1, to: 1, msg: Request{ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}})
+	c.enqueue(envelope{from: -1, to: 1, msg: message.Request{ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}})
 	c.settle()
 	c.check()
 	if len(c.replies) != 0 {
@@ -327,10 +329,10 @@ func TestRecoveringReplicaIgnoresProtocolMessages(t *testing.T) {
 	c := newCluster(t, 3, 1)
 	c.restart(1)
 	r := c.replicas[1]
-	e := Entry{Kind: EntryOp, ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}
-	r.Step(Prepare{View: 0, OpNum: 1, Entry: e})
-	r.Step(StartView{View: 1, OpNum: 1, Log: []Entry{e}})
-	r.Step(Commit{View: 0, CommitNum: 1})
+	e := message.Entry{Kind: message.EntryOp, ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}
+	r.Step(message.Prepare{View: 0, OpNum: 1, Entry: e})
+	r.Step(message.StartView{View: 1, OpNum: 1, Log: []message.Entry{e}})
+	r.Step(message.Commit{View: 0, CommitNum: 1})
 	if r.Status() != StatusRecovering || r.OpNum() != 0 {
 		t.Fatalf("recovering replica accepted protocol message: status=%v op=%d", r.Status(), r.OpNum())
 	}
@@ -339,46 +341,46 @@ func TestRecoveringReplicaIgnoresProtocolMessages(t *testing.T) {
 func TestDuplicateDoViewChangeCountsDistinctReplicas(t *testing.T) {
 	c := newCluster(t, 5, 1)
 	r := c.replicas[1]
-	r.Step(StartViewChange{Epoch: 0, View: 1, Replica: 2})
-	dvc := DoViewChange{View: 1, Replica: 2}
+	r.Step(message.StartViewChange{Epoch: 0, View: 1, Replica: 2})
+	dvc := message.DoViewChange{View: 1, Replica: 2}
 	r.Step(dvc)
 	r.Step(dvc)
 	if r.Status() != StatusViewChange {
-		t.Fatalf("duplicate DoViewChange completed the view change")
+		t.Fatalf("duplicate message.DoViewChange completed the view change")
 	}
-	r.Step(DoViewChange{View: 1, Replica: 3})
+	r.Step(message.DoViewChange{View: 1, Replica: 3})
 	if r.Status() != StatusNormal || r.View() != 1 || !r.IsPrimary() {
 		t.Fatalf("view change did not complete: %s", c.describe())
 	}
 	starts := 0
 	for _, e := range c.queue {
-		if _, ok := e.msg.(StartView); ok {
+		if _, ok := e.msg.(message.StartView); ok {
 			starts++
 		}
 	}
 	if starts != 4 {
-		t.Fatalf("sent %d StartView messages, want 4", starts)
+		t.Fatalf("sent %d message.StartView messages, want 4", starts)
 	}
 }
 
 func TestDuplicateStartViewIgnored(t *testing.T) {
 	c := newCluster(t, 3, 1)
 	r := c.replicas[2]
-	e := Entry{Kind: EntryOp, ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}
-	r.Step(StartView{View: 1, OpNum: 1, Log: []Entry{e}})
-	r.Step(StartView{View: 1, OpNum: 2, Log: []Entry{e, e}})
+	e := message.Entry{Kind: message.EntryOp, ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}
+	r.Step(message.StartView{View: 1, OpNum: 1, Log: []message.Entry{e}})
+	r.Step(message.StartView{View: 1, OpNum: 2, Log: []message.Entry{e, e}})
 	if r.Status() != StatusNormal || r.View() != 1 || r.OpNum() != 1 {
-		t.Fatalf("duplicate StartView replaced the log: status=%v view=%d op=%d", r.Status(), r.View(), r.OpNum())
+		t.Fatalf("duplicate message.StartView replaced the log: status=%v view=%d op=%d", r.Status(), r.View(), r.OpNum())
 	}
 }
 
 func TestMessagesFromOtherEpochDropped(t *testing.T) {
 	c := newCluster(t, 3, 1)
 	r := c.replicas[1]
-	e := Entry{Kind: EntryOp, ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}
-	r.Step(Prepare{Epoch: 1, View: 0, OpNum: 1, Entry: e})
-	r.Step(StartViewChange{Epoch: 1, View: 1, Replica: 2})
-	r.Step(Commit{Epoch: 2, View: 0, CommitNum: 1})
+	e := message.Entry{Kind: message.EntryOp, ClientID: 1, RequestNum: 1, Op: []byte(opKey(1, 1))}
+	r.Step(message.Prepare{Epoch: 1, View: 0, OpNum: 1, Entry: e})
+	r.Step(message.StartViewChange{Epoch: 1, View: 1, Replica: 2})
+	r.Step(message.Commit{Epoch: 2, View: 0, CommitNum: 1})
 	if r.OpNum() != 0 || r.Status() != StatusNormal || r.View() != 0 {
 		t.Fatalf("message from another epoch changed state")
 	}
@@ -394,8 +396,8 @@ func TestLaggingReplicaDoesNotLoseExecutedOp(t *testing.T) {
 		t.Fatalf("op A not committed by primary and backup 1")
 	}
 	c.filter = func(e envelope) bool {
-		_, startView := e.msg.(StartView)
-		_, getState := e.msg.(GetState)
+		_, startView := e.msg.(message.StartView)
+		_, getState := e.msg.(message.GetState)
 		return (startView && e.to == 2) || (getState && e.from == 2)
 	}
 	c.isolate(0)

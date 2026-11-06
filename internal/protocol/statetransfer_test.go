@@ -3,12 +3,14 @@ package protocol
 import (
 	"slices"
 	"testing"
+
+	"github.com/derinil/vsr/message"
 )
 
-func opEntries(from, to uint64) []Entry {
-	var es []Entry
+func opEntries(from, to uint64) []message.Entry {
+	var es []message.Entry
 	for op := from; op <= to; op++ {
-		es = append(es, Entry{RequestNum: op})
+		es = append(es, message.Entry{RequestNum: op})
 	}
 	return es
 }
@@ -20,7 +22,7 @@ func TestAdoptLog(t *testing.T) {
 		commit    uint64
 		logLen    uint64
 		adoptBase uint64
-		adopt     []Entry
+		adopt     []message.Entry
 		wantBase  uint64
 		wantOps   []uint64
 		wantFetch bool
@@ -52,8 +54,8 @@ func TestAdoptLog(t *testing.T) {
 				t.Fatalf("fetching = %v, want %v", fetching, tc.wantFetch)
 			}
 			if tc.wantFetch {
-				if len(out.sent) != 1 || out.sent[0].Type() != MsgGetCheckpoint {
-					t.Fatalf("sent %v, want one GetCheckpoint", out.sent)
+				if len(out.sent) != 1 || out.sent[0].Type() != message.TypeGetCheckpoint {
+					t.Fatalf("sent %v, want one message.GetCheckpoint", out.sent)
 				}
 			} else if len(out.sent) != 0 {
 				t.Fatalf("sent %v without fetch", out.sent)

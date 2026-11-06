@@ -1,78 +1,80 @@
-package protocol
+// Package message defines the protocol messages exchanged by replicas and
+// clients, and their binary encoding.
+package message
 
 import "fmt"
 
-// MsgType identifies a protocol message on the wire.
-type MsgType uint8
+// Type identifies a message on the wire.
+type Type uint8
 
 const (
-	MsgRequest MsgType = iota + 1
-	MsgReconfiguration
-	MsgCheckEpoch
-	MsgReply
-	MsgNewEpoch
-	MsgPrepare
-	MsgPrepareOK
-	MsgCommit
-	MsgStartViewChange
-	MsgDoViewChange
-	MsgStartView
-	MsgRecovery
-	MsgRecoveryResponse
-	MsgGetState
-	MsgNewState
-	MsgStartEpoch
-	MsgEpochStarted
-	// MsgGetCheckpoint requests a checkpoint at or after a given op.
-	MsgGetCheckpoint
-	// MsgCheckpointInfo describes the sender's latest checkpoint.
-	MsgCheckpointInfo
-	// MsgGetMerkle requests Merkle node hashes of a checkpoint.
-	MsgGetMerkle
-	// MsgMerkleNodes answers MsgGetMerkle.
-	MsgMerkleNodes
-	// MsgGetPages requests checkpoint pages.
-	MsgGetPages
-	// MsgPages answers MsgGetPages.
-	MsgPages
+	TypeRequest Type = iota + 1
+	TypeReconfiguration
+	TypeCheckEpoch
+	TypeReply
+	TypeNewEpoch
+	TypePrepare
+	TypePrepareOK
+	TypeCommit
+	TypeStartViewChange
+	TypeDoViewChange
+	TypeStartView
+	TypeRecovery
+	TypeRecoveryResponse
+	TypeGetState
+	TypeNewState
+	TypeStartEpoch
+	TypeEpochStarted
+	// TypeGetCheckpoint requests a checkpoint at or after a given op.
+	TypeGetCheckpoint
+	// TypeCheckpointInfo describes the sender's latest checkpoint.
+	TypeCheckpointInfo
+	// TypeGetMerkle requests Merkle node hashes of a checkpoint.
+	TypeGetMerkle
+	// TypeMerkleNodes answers TypeGetMerkle.
+	TypeMerkleNodes
+	// TypeGetPages requests checkpoint pages.
+	TypeGetPages
+	// TypePages answers TypeGetPages.
+	TypePages
 )
 
-var msgTypeNames = [...]string{
-	MsgRequest:          "Request",
-	MsgReconfiguration:  "Reconfiguration",
-	MsgCheckEpoch:       "CheckEpoch",
-	MsgReply:            "Reply",
-	MsgNewEpoch:         "NewEpoch",
-	MsgPrepare:          "Prepare",
-	MsgPrepareOK:        "PrepareOK",
-	MsgCommit:           "Commit",
-	MsgStartViewChange:  "StartViewChange",
-	MsgDoViewChange:     "DoViewChange",
-	MsgStartView:        "StartView",
-	MsgRecovery:         "Recovery",
-	MsgRecoveryResponse: "RecoveryResponse",
-	MsgGetState:         "GetState",
-	MsgNewState:         "NewState",
-	MsgStartEpoch:       "StartEpoch",
-	MsgEpochStarted:     "EpochStarted",
-	MsgGetCheckpoint:    "GetCheckpoint",
-	MsgCheckpointInfo:   "CheckpointInfo",
-	MsgGetMerkle:        "GetMerkle",
-	MsgMerkleNodes:      "MerkleNodes",
-	MsgGetPages:         "GetPages",
-	MsgPages:            "Pages",
+var typeNames = [...]string{
+	TypeRequest:          "Request",
+	TypeReconfiguration:  "Reconfiguration",
+	TypeCheckEpoch:       "CheckEpoch",
+	TypeReply:            "Reply",
+	TypeNewEpoch:         "NewEpoch",
+	TypePrepare:          "Prepare",
+	TypePrepareOK:        "PrepareOK",
+	TypeCommit:           "Commit",
+	TypeStartViewChange:  "StartViewChange",
+	TypeDoViewChange:     "DoViewChange",
+	TypeStartView:        "StartView",
+	TypeRecovery:         "Recovery",
+	TypeRecoveryResponse: "RecoveryResponse",
+	TypeGetState:         "GetState",
+	TypeNewState:         "NewState",
+	TypeStartEpoch:       "StartEpoch",
+	TypeEpochStarted:     "EpochStarted",
+	TypeGetCheckpoint:    "GetCheckpoint",
+	TypeCheckpointInfo:   "CheckpointInfo",
+	TypeGetMerkle:        "GetMerkle",
+	TypeMerkleNodes:      "MerkleNodes",
+	TypeGetPages:         "GetPages",
+	TypePages:            "Pages",
 }
 
-func (t MsgType) String() string {
-	if int(t) < len(msgTypeNames) && msgTypeNames[t] != "" {
-		return msgTypeNames[t]
+func (t Type) String() string {
+	if int(t) < len(typeNames) && typeNames[t] != "" {
+		return typeNames[t]
 	}
-	return fmt.Sprintf("MsgType(%d)", uint8(t))
+	return fmt.Sprintf("Type(%d)", uint8(t))
 }
 
 // Message is any protocol message.
 type Message interface {
-	Type() MsgType
+	Type() Type
 }
 
 // Request asks the primary to execute Op for a client.
@@ -229,29 +231,29 @@ type Pages struct {
 	Data    [][]byte
 }
 
-func (Request) Type() MsgType          { return MsgRequest }
-func (Reconfiguration) Type() MsgType  { return MsgReconfiguration }
-func (CheckEpoch) Type() MsgType       { return MsgCheckEpoch }
-func (Reply) Type() MsgType            { return MsgReply }
-func (NewEpoch) Type() MsgType         { return MsgNewEpoch }
-func (Prepare) Type() MsgType          { return MsgPrepare }
-func (PrepareOK) Type() MsgType        { return MsgPrepareOK }
-func (Commit) Type() MsgType           { return MsgCommit }
-func (StartViewChange) Type() MsgType  { return MsgStartViewChange }
-func (DoViewChange) Type() MsgType     { return MsgDoViewChange }
-func (StartView) Type() MsgType        { return MsgStartView }
-func (Recovery) Type() MsgType         { return MsgRecovery }
-func (RecoveryResponse) Type() MsgType { return MsgRecoveryResponse }
-func (GetState) Type() MsgType         { return MsgGetState }
-func (NewState) Type() MsgType         { return MsgNewState }
-func (StartEpoch) Type() MsgType       { return MsgStartEpoch }
-func (EpochStarted) Type() MsgType     { return MsgEpochStarted }
-func (GetCheckpoint) Type() MsgType    { return MsgGetCheckpoint }
-func (CheckpointInfo) Type() MsgType   { return MsgCheckpointInfo }
-func (GetMerkle) Type() MsgType        { return MsgGetMerkle }
-func (MerkleNodes) Type() MsgType      { return MsgMerkleNodes }
-func (GetPages) Type() MsgType         { return MsgGetPages }
-func (Pages) Type() MsgType            { return MsgPages }
+func (Request) Type() Type          { return TypeRequest }
+func (Reconfiguration) Type() Type  { return TypeReconfiguration }
+func (CheckEpoch) Type() Type       { return TypeCheckEpoch }
+func (Reply) Type() Type            { return TypeReply }
+func (NewEpoch) Type() Type         { return TypeNewEpoch }
+func (Prepare) Type() Type          { return TypePrepare }
+func (PrepareOK) Type() Type        { return TypePrepareOK }
+func (Commit) Type() Type           { return TypeCommit }
+func (StartViewChange) Type() Type  { return TypeStartViewChange }
+func (DoViewChange) Type() Type     { return TypeDoViewChange }
+func (StartView) Type() Type        { return TypeStartView }
+func (Recovery) Type() Type         { return TypeRecovery }
+func (RecoveryResponse) Type() Type { return TypeRecoveryResponse }
+func (GetState) Type() Type         { return TypeGetState }
+func (NewState) Type() Type         { return TypeNewState }
+func (StartEpoch) Type() Type       { return TypeStartEpoch }
+func (EpochStarted) Type() Type     { return TypeEpochStarted }
+func (GetCheckpoint) Type() Type    { return TypeGetCheckpoint }
+func (CheckpointInfo) Type() Type   { return TypeCheckpointInfo }
+func (GetMerkle) Type() Type        { return TypeGetMerkle }
+func (MerkleNodes) Type() Type      { return TypeMerkleNodes }
+func (GetPages) Type() Type         { return TypeGetPages }
+func (Pages) Type() Type            { return TypePages }
 
 // ClientOf returns the client ID of a client-originated message.
 func ClientOf(m Message) (uint64, bool) {
@@ -264,4 +266,25 @@ func ClientOf(m Message) (uint64, bool) {
 		return m.ClientID, true
 	}
 	return 0, false
+}
+
+// EntryKind identifies what a log entry carries.
+type EntryKind uint8
+
+const (
+	// EntryOp is a client operation for the Service.
+	EntryOp EntryKind = iota
+	// EntryReconfig switches the cluster to a new configuration.
+	EntryReconfig
+	// EntryCheckEpoch confirms a client has reached the current epoch.
+	EntryCheckEpoch
+)
+
+// Entry is a single replicated log entry.
+type Entry struct {
+	Kind       EntryKind
+	ClientID   uint64
+	RequestNum uint64
+	Op         []byte
+	Config     []string
 }

@@ -12,16 +12,16 @@ import (
 	"testing"
 
 	"github.com/derinil/vsr/internal/kvservice"
-	"github.com/derinil/vsr/internal/protocol"
 	"github.com/derinil/vsr/internal/vsrstatus"
+	"github.com/derinil/vsr/message"
 )
 
 type nopTransport struct{}
 
-func (nopTransport) Send(string, []byte)  {}
-func (nopTransport) Reply(uint64, []byte) {}
-func (nopTransport) Listen(string) error  { return nil }
-func (nopTransport) Close() error         { return nil }
+func (nopTransport) Send(string, message.Message)  {}
+func (nopTransport) Reply(uint64, message.Message) {}
+func (nopTransport) Listen(string) error           { return nil }
+func (nopTransport) Close() error                  { return nil }
 
 type peersTransport struct {
 	nopTransport
@@ -105,7 +105,7 @@ func TestStatusCounters(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s, deliver := newStub(t, nopTransport{}, ReplicaOptions{InboxSize: tt.inboxSize})
 			for i := range tt.delivered {
-				deliver(encode(protocol.Commit{CommitNum: uint64(i)}))
+				deliver(message.Commit{CommitNum: uint64(i)})
 			}
 			st := s.status()
 			if st.Received != tt.wantReceived || st.InboxDropped != tt.wantDropped {

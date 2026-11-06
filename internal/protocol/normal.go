@@ -1,16 +1,20 @@
 package protocol
 
-import "slices"
+import (
+	"slices"
 
-func (r *Replica) onRequest(m Request) {
-	r.propose(m.ClientID, m.RequestNum, Entry{Kind: EntryOp, ClientID: m.ClientID, RequestNum: m.RequestNum, Op: m.Op})
+	"github.com/derinil/vsr/message"
+)
+
+func (r *Replica) onRequest(m message.Request) {
+	r.propose(m.ClientID, m.RequestNum, message.Entry{Kind: message.EntryOp, ClientID: m.ClientID, RequestNum: m.RequestNum, Op: m.Op})
 }
 
-func (r *Replica) prepareMsg(n uint64) Prepare {
-	return Prepare{Epoch: r.epoch, View: r.view, OpNum: n, CommitNum: r.commitNum, Entry: r.entry(n)}
+func (r *Replica) prepareMsg(n uint64) message.Prepare {
+	return message.Prepare{Epoch: r.epoch, View: r.view, OpNum: n, CommitNum: r.commitNum, Entry: r.entry(n)}
 }
 
-func (r *Replica) onPrepare(m Prepare) {
+func (r *Replica) onPrepare(m message.Prepare) {
 	if !r.acceptPrimary(m.View) {
 		return
 	}
@@ -24,11 +28,11 @@ func (r *Replica) onPrepare(m Prepare) {
 		r.requestState(m.OpNum)
 		return
 	}
-	r.send(r.primaryOf(r.view), PrepareOK{Epoch: r.epoch, View: r.view, OpNum: m.OpNum, Replica: r.index})
+	r.send(r.primaryOf(r.view), message.PrepareOK{Epoch: r.epoch, View: r.view, OpNum: m.OpNum, Replica: r.index})
 	r.commitUpTo(m.CommitNum)
 }
 
-func (r *Replica) onPrepareOK(m PrepareOK) {
+func (r *Replica) onPrepareOK(m message.PrepareOK) {
 	if !r.IsPrimary() || m.View != r.view || !r.validReplica(m.Replica) {
 		return
 	}
@@ -36,7 +40,7 @@ func (r *Replica) onPrepareOK(m PrepareOK) {
 	r.commitUpTo(r.majorityAck())
 }
 
-func (r *Replica) onCommit(m Commit) {
+func (r *Replica) onCommit(m message.Commit) {
 	if !r.acceptPrimary(m.View) {
 		return
 	}
@@ -79,7 +83,7 @@ func (r *Replica) commitUpTo(k uint64) {
 	for r.commitNum < k {
 		e := r.entry(r.commitNum + 1)
 		var result []byte
-		if e.Kind == EntryOp {
+		if e.Kind == message.EntryOp {
 			result = r.service.Execute(e.Op)
 		}
 		r.commitNum++
@@ -90,7 +94,7 @@ func (r *Replica) commitUpTo(k uint64) {
 		if r.checkpointInterval > 0 && r.commitNum%r.checkpointInterval == 0 {
 			r.takeCheckpoint()
 		}
-		if e.Kind == EntryReconfig && r.commitNum > r.epochStart {
+		if e.Kind == message.EntryReconfig && r.commitNum > r.epochStart {
 			r.switchEpoch(e)
 			return
 		}
@@ -101,7 +105,7 @@ func (r *Replica) commitUpTo(k uint64) {
 }
 
 func (r *Replica) heartbeat() {
-	r.broadcast(Commit{Epoch: r.epoch, View: r.view, CommitNum: r.commitNum})
+	r.broadcast(message.Commit{Epoch: r.epoch, View: r.view, CommitNum: r.commitNum})
 	r.resendPrepares()
 	r.resetTimer()
 }

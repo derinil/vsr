@@ -2,7 +2,11 @@
 // deterministic, single-threaded state machine driven by Step and Tick.
 package protocol
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/derinil/vsr/message"
+)
 
 // Status is a replica's protocol status.
 type Status uint8
@@ -29,27 +33,6 @@ func (s Status) String() string {
 	return fmt.Sprintf("Status(%d)", uint8(s))
 }
 
-// EntryKind identifies what a log entry carries.
-type EntryKind uint8
-
-const (
-	// EntryOp is a client operation for the Service.
-	EntryOp EntryKind = iota
-	// EntryReconfig switches the cluster to a new configuration.
-	EntryReconfig
-	// EntryCheckEpoch confirms a client has reached the current epoch.
-	EntryCheckEpoch
-)
-
-// Entry is a single replicated log entry.
-type Entry struct {
-	Kind       EntryKind
-	ClientID   uint64
-	RequestNum uint64
-	Op         []byte
-	Config     []string
-}
-
 // Service is the deterministic state machine being replicated.
 // Execute applies a committed op and returns its result.
 type Service interface {
@@ -64,6 +47,6 @@ type Snapshotter interface {
 
 // Outbox sends messages to replicas by address and replies to clients by ID.
 type Outbox interface {
-	Send(to string, m Message)
-	Reply(client uint64, m Message)
+	Send(to string, m message.Message)
+	Reply(client uint64, m message.Message)
 }

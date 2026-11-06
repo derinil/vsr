@@ -12,31 +12,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derinil/vsr/internal/protocol"
 	"github.com/derinil/vsr/internal/vsrstatus"
 	"github.com/derinil/vsr/internal/vsrtcp"
+	"github.com/derinil/vsr/message"
 )
 
 const timeout = 5 * time.Second
 
-var samples = []protocol.Message{
-	protocol.Request{Epoch: 1, ClientID: 7, RequestNum: 3, Op: []byte("put k v")},
-	protocol.Reconfiguration{Epoch: 1, ClientID: 7, RequestNum: 4, Config: []string{"a:1", "b:2", "c:3"}},
-	protocol.CheckEpoch{Epoch: 2, ClientID: 7, RequestNum: 5},
-	protocol.Reply{Epoch: 2, View: 3, ClientID: 7, RequestNum: 5, Result: []byte("ok")},
-	protocol.NewEpoch{Epoch: 3, View: 4, Config: []string{"a:1"}},
-	protocol.Prepare{Epoch: 1, View: 2, OpNum: 9, CommitNum: 8, Entry: protocol.Entry{Kind: protocol.EntryOp, ClientID: 7, RequestNum: 3, Op: []byte("x")}},
-	protocol.PrepareOK{Epoch: 1, View: 2, OpNum: 9, Replica: 1},
-	protocol.Commit{Epoch: 1, View: 2, CommitNum: 9},
-	protocol.StartViewChange{Epoch: 1, View: 5, Replica: 2},
-	protocol.DoViewChange{Epoch: 1, View: 5, LastNormalView: 4, OpNum: 9, CommitNum: 8, Log: []protocol.Entry{{Kind: protocol.EntryReconfig, Config: []string{"a:1"}}}, Replica: 0},
-	protocol.StartView{Epoch: 1, View: 5, OpNum: 9, CommitNum: 8, Log: []protocol.Entry{{Kind: protocol.EntryCheckEpoch, ClientID: 1, RequestNum: 1}}},
-	protocol.Recovery{Epoch: 1, Nonce: 99, Replica: 2},
-	protocol.RecoveryResponse{Epoch: 1, View: 5, Nonce: 99, OpNum: 9, CommitNum: 8, Log: []protocol.Entry{{Kind: protocol.EntryOp, Op: []byte("y")}}, HasLog: true, Config: []string{"a:1", "b:2"}, OldConfig: []string{"a:1"}, Replica: 0},
-	protocol.GetState{Epoch: 1, View: 5, OpNum: 8, Replica: 1},
-	protocol.NewState{Epoch: 1, View: 5, OpNum: 9, CommitNum: 8, Log: []protocol.Entry{{Kind: protocol.EntryOp, ClientID: 2, RequestNum: 2, Op: []byte("z")}}},
-	protocol.StartEpoch{Epoch: 2, OpNum: 9, OldConfig: []string{"a:1", "b:2"}, NewConfig: []string{"b:2", "c:3"}, From: "b:2"},
-	protocol.EpochStarted{Epoch: 2, Replica: 0},
+var samples = []message.Message{
+	message.Request{Epoch: 1, ClientID: 7, RequestNum: 3, Op: []byte("put k v")},
+	message.Reconfiguration{Epoch: 1, ClientID: 7, RequestNum: 4, Config: []string{"a:1", "b:2", "c:3"}},
+	message.CheckEpoch{Epoch: 2, ClientID: 7, RequestNum: 5},
+	message.Reply{Epoch: 2, View: 3, ClientID: 7, RequestNum: 5, Result: []byte("ok")},
+	message.NewEpoch{Epoch: 3, View: 4, Config: []string{"a:1"}},
+	message.Prepare{Epoch: 1, View: 2, OpNum: 9, CommitNum: 8, Entry: message.Entry{Kind: message.EntryOp, ClientID: 7, RequestNum: 3, Op: []byte("x")}},
+	message.PrepareOK{Epoch: 1, View: 2, OpNum: 9, Replica: 1},
+	message.Commit{Epoch: 1, View: 2, CommitNum: 9},
+	message.StartViewChange{Epoch: 1, View: 5, Replica: 2},
+	message.DoViewChange{Epoch: 1, View: 5, LastNormalView: 4, OpNum: 9, CommitNum: 8, Log: []message.Entry{{Kind: message.EntryReconfig, Config: []string{"a:1"}}}, Replica: 0},
+	message.StartView{Epoch: 1, View: 5, OpNum: 9, CommitNum: 8, Log: []message.Entry{{Kind: message.EntryCheckEpoch, ClientID: 1, RequestNum: 1}}},
+	message.Recovery{Epoch: 1, Nonce: 99, Replica: 2},
+	message.RecoveryResponse{Epoch: 1, View: 5, Nonce: 99, OpNum: 9, CommitNum: 8, Log: []message.Entry{{Kind: message.EntryOp, Op: []byte("y")}}, HasLog: true, Config: []string{"a:1", "b:2"}, OldConfig: []string{"a:1"}, Replica: 0},
+	message.GetState{Epoch: 1, View: 5, OpNum: 8, Replica: 1},
+	message.NewState{Epoch: 1, View: 5, OpNum: 9, CommitNum: 8, Log: []message.Entry{{Kind: message.EntryOp, ClientID: 2, RequestNum: 2, Op: []byte("z")}}},
+	message.StartEpoch{Epoch: 2, OpNum: 9, OldConfig: []string{"a:1", "b:2"}, NewConfig: []string{"b:2", "c:3"}, From: "b:2"},
+	message.EpochStarted{Epoch: 2, Replica: 0},
 }
 
 func newTransport(t *testing.T, h vsrtcp.Handler, o vsrtcp.Options) *vsrtcp.Transport {
@@ -54,22 +54,12 @@ func listen(t *testing.T, tr *vsrtcp.Transport) string {
 	return tr.Addr().String()
 }
 
-func inbox(n int) (vsrtcp.Handler, chan protocol.Message) {
-	ch := make(chan protocol.Message, n)
-	return func(b []byte) error {
-		m, err := protocol.DecodeMessage(b)
-		if err == nil {
-			ch <- m
-		}
-		return err
-	}, ch
+func inbox(n int) (vsrtcp.Handler, chan message.Message) {
+	ch := make(chan message.Message, n)
+	return func(m message.Message) { ch <- m }, ch
 }
 
-func discard([]byte) error { return nil }
-
-func enc(m protocol.Message) []byte { return protocol.AppendMessage(nil, m) }
-
-func next(t *testing.T, ch <-chan protocol.Message) protocol.Message {
+func next(t *testing.T, ch <-chan message.Message) message.Message {
 	t.Helper()
 	select {
 	case m := <-ch:
@@ -80,7 +70,7 @@ func next(t *testing.T, ch <-chan protocol.Message) protocol.Message {
 	}
 }
 
-func expectNone(t *testing.T, ch <-chan protocol.Message) {
+func expectNone(t *testing.T, ch <-chan message.Message) {
 	t.Helper()
 	select {
 	case m := <-ch:
@@ -104,7 +94,7 @@ func frame(payload []byte) []byte {
 }
 
 func TestListen(t *testing.T) {
-	tr := newTransport(t, discard, vsrtcp.Options{})
+	tr := newTransport(t, func(message.Message) {}, vsrtcp.Options{})
 	if tr.Addr() != nil {
 		t.Fatal("Addr before Listen should be nil")
 	}
@@ -118,11 +108,11 @@ func TestListen(t *testing.T) {
 }
 
 func TestSendDeliversEveryMessageType(t *testing.T) {
-	covered := make(map[protocol.MsgType]bool)
+	covered := make(map[message.Type]bool)
 	for _, m := range samples {
 		covered[m.Type()] = true
 	}
-	for mt := protocol.MsgRequest; mt <= protocol.MsgEpochStarted; mt++ {
+	for mt := message.TypeRequest; mt <= message.TypeEpochStarted; mt++ {
 		if !covered[mt] {
 			t.Errorf("no sample for %v", mt)
 		}
@@ -130,11 +120,11 @@ func TestSendDeliversEveryMessageType(t *testing.T) {
 
 	h, ch := inbox(len(samples))
 	addr := listen(t, newTransport(t, h, vsrtcp.Options{}))
-	sender := newTransport(t, discard, vsrtcp.Options{})
+	sender := newTransport(t, func(message.Message) {}, vsrtcp.Options{})
 
 	for _, m := range samples {
 		t.Run(m.Type().String(), func(t *testing.T) {
-			sender.Send(addr, enc(m))
+			sender.Send(addr, m)
 			if got := next(t, ch); !reflect.DeepEqual(got, m) {
 				t.Fatalf("got %#v, want %#v", got, m)
 			}
@@ -150,21 +140,21 @@ func TestReplyRoutesToClient(t *testing.T) {
 	replies, replyCh := inbox(2)
 	client := newTransport(t, replies, vsrtcp.Options{})
 
-	req := protocol.Request{Epoch: 1, ClientID: 42, RequestNum: 1, Op: []byte("get k")}
-	client.Send(addr, enc(req))
+	req := message.Request{Epoch: 1, ClientID: 42, RequestNum: 1, Op: []byte("get k")}
+	client.Send(addr, req)
 	if got := next(t, reqCh); !reflect.DeepEqual(got, req) {
 		t.Fatalf("got %#v, want %#v", got, req)
 	}
 
-	rep := protocol.Reply{Epoch: 1, ClientID: 42, RequestNum: 1, Result: []byte("v")}
+	rep := message.Reply{Epoch: 1, ClientID: 42, RequestNum: 1, Result: []byte("v")}
 
 	t.Run("unknown client dropped", func(t *testing.T) {
-		srv.Reply(43, enc(rep))
+		srv.Reply(43, rep)
 		expectNone(t, replyCh)
 	})
 
 	t.Run("known client receives", func(t *testing.T) {
-		srv.Reply(42, enc(rep))
+		srv.Reply(42, rep)
 		if got := next(t, replyCh); !reflect.DeepEqual(got, rep) {
 			t.Fatalf("got %#v, want %#v", got, rep)
 		}
@@ -175,13 +165,13 @@ func TestOrderedDelivery(t *testing.T) {
 	const n = 10_000
 	h, ch := inbox(n)
 	addr := listen(t, newTransport(t, h, vsrtcp.Options{}))
-	sender := newTransport(t, discard, vsrtcp.Options{QueueSize: n})
+	sender := newTransport(t, func(message.Message) {}, vsrtcp.Options{QueueSize: n})
 
 	for i := range n {
-		sender.Send(addr, enc(protocol.PrepareOK{OpNum: uint64(i), Replica: 1}))
+		sender.Send(addr, message.PrepareOK{OpNum: uint64(i), Replica: 1})
 	}
 	for i := range n {
-		m, ok := next(t, ch).(protocol.PrepareOK)
+		m, ok := next(t, ch).(message.PrepareOK)
 		if !ok || m.OpNum != uint64(i) {
 			t.Fatalf("message %d: got %#v", i, m)
 		}
@@ -193,8 +183,8 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	srv1 := newTransport(t, h1, vsrtcp.Options{})
 	addr := listen(t, srv1)
 
-	client := newTransport(t, discard, vsrtcp.Options{Backoff: 10 * time.Millisecond})
-	client.Send(addr, enc(protocol.Commit{View: 1, CommitNum: 0}))
+	client := newTransport(t, func(message.Message) {}, vsrtcp.Options{Backoff: 10 * time.Millisecond})
+	client.Send(addr, message.Commit{View: 1, CommitNum: 0})
 	next(t, ch1)
 
 	srv1.Close()
@@ -207,10 +197,10 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 
 	deadline := time.Now().Add(timeout)
 	for i := uint64(1); time.Now().Before(deadline); i++ {
-		client.Send(addr, enc(protocol.Commit{View: 1, CommitNum: i}))
+		client.Send(addr, message.Commit{View: 1, CommitNum: i})
 		select {
 		case m := <-ch2:
-			if _, ok := m.(protocol.Commit); !ok {
+			if _, ok := m.(message.Commit); !ok {
 				t.Fatalf("got %#v, want Commit", m)
 			}
 			return
@@ -222,13 +212,13 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 
 func TestSendToUnreachableDoesNotBlock(t *testing.T) {
 	addr := unusedAddr(t)
-	tr := vsrtcp.New(discard, vsrtcp.Options{DialTimeout: 100 * time.Millisecond})
+	tr := vsrtcp.New(func(message.Message) {}, vsrtcp.Options{DialTimeout: 100 * time.Millisecond})
 
 	sent := make(chan struct{})
 	go func() {
 		defer close(sent)
 		for i := range 10_000 {
-			tr.Send(addr, enc(protocol.Commit{CommitNum: uint64(i)}))
+			tr.Send(addr, message.Commit{CommitNum: uint64(i)})
 		}
 	}()
 	select {
@@ -256,11 +246,11 @@ func TestStalledPeerDoesNotWedgeWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	client := newTransport(t, discard, vsrtcp.Options{WriteTimeout: writeTimeout, QueueSize: 4, Backoff: 10 * time.Millisecond})
+	client := newTransport(t, func(message.Message) {}, vsrtcp.Options{WriteTimeout: writeTimeout, QueueSize: 4, Backoff: 10 * time.Millisecond})
 
 	op := make([]byte, 1<<20)
 	for i := range 256 {
-		client.Send(addr, enc(protocol.Request{Epoch: 1, ClientID: 1, RequestNum: uint64(i), Op: op}))
+		client.Send(addr, message.Request{Epoch: 1, ClientID: 1, RequestNum: uint64(i), Op: op})
 	}
 
 	ln.SetDeadline(time.Now().Add(timeout))
@@ -283,10 +273,10 @@ func TestStalledPeerDoesNotWedgeWriter(t *testing.T) {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		client.Send(addr, enc(protocol.Commit{CommitNum: 1}))
+		client.Send(addr, message.Commit{CommitNum: 1})
 		select {
 		case m := <-ch:
-			if _, ok := m.(protocol.Commit); ok {
+			if _, ok := m.(message.Commit); ok {
 				return
 			}
 		case <-time.After(10 * time.Millisecond):
@@ -300,14 +290,14 @@ func TestInboundFrames(t *testing.T) {
 	h, ch := inbox(16)
 	addr := listen(t, newTransport(t, h, vsrtcp.Options{MaxFrameSize: maxFrame}))
 
-	valid := protocol.AppendMessage(nil, protocol.Commit{CommitNum: 1})
+	valid := message.Append(nil, message.Commit{CommitNum: 1})
 
 	t.Run("valid frame delivered", func(t *testing.T) {
 		c := dial(t, addr)
 		if _, err := c.Write(frame(valid)); err != nil {
 			t.Fatal(err)
 		}
-		if got := next(t, ch); !reflect.DeepEqual(got, protocol.Commit{CommitNum: 1}) {
+		if got := next(t, ch); !reflect.DeepEqual(got, message.Commit{CommitNum: 1}) {
 			t.Fatalf("got %#v", got)
 		}
 	})
@@ -319,7 +309,7 @@ func TestInboundFrames(t *testing.T) {
 		{"oversize header", binary.BigEndian.AppendUint32(nil, maxFrame+1)},
 		{"empty frame", frame(nil)},
 		{"unknown type", frame([]byte{0xff})},
-		{"truncated message", frame([]byte{byte(protocol.MsgRequest), 1})},
+		{"truncated message", frame([]byte{byte(message.TypeRequest), 1})},
 		{"trailing bytes", frame(append(slices.Clone(valid), 0))},
 	}
 	for _, tc := range rejected {
@@ -349,9 +339,9 @@ func dial(t *testing.T, addr string) net.Conn {
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
-	tr := vsrtcp.New(discard, vsrtcp.Options{})
+	tr := vsrtcp.New(func(message.Message) {}, vsrtcp.Options{})
 	addr := listen(t, tr)
-	tr.Send(addr, enc(protocol.Commit{}))
+	tr.Send(addr, message.Commit{})
 
 	if err := tr.Close(); err != nil {
 		t.Fatal(err)
@@ -359,8 +349,8 @@ func TestCloseIsIdempotent(t *testing.T) {
 	if err := tr.Close(); err != nil {
 		t.Fatal(err)
 	}
-	tr.Send(addr, enc(protocol.Commit{}))
-	tr.Reply(1, enc(protocol.Reply{}))
+	tr.Send(addr, message.Commit{})
+	tr.Reply(1, message.Reply{})
 	if err := tr.Listen("127.0.0.1:0"); err == nil {
 		t.Fatal("Listen after Close should fail")
 	}
@@ -382,7 +372,7 @@ func waitPeer(t *testing.T, tr *vsrtcp.Transport, done func(vsrstatus.Peer) bool
 }
 
 func TestPeersEmpty(t *testing.T) {
-	tr := newTransport(t, discard, vsrtcp.Options{})
+	tr := newTransport(t, func(message.Message) {}, vsrtcp.Options{})
 	if ps := tr.Peers(); ps == nil || len(ps) != 0 {
 		t.Fatalf("Peers() = %#v, want empty non-nil slice", ps)
 	}
@@ -408,9 +398,9 @@ func TestPeersStats(t *testing.T) {
 				h, _ := inbox(tt.sends)
 				addr = listen(t, newTransport(t, h, vsrtcp.Options{}))
 			}
-			sender := newTransport(t, discard, vsrtcp.Options{QueueSize: tt.queueSize, Backoff: 10 * time.Millisecond})
+			sender := newTransport(t, func(message.Message) {}, vsrtcp.Options{QueueSize: tt.queueSize, Backoff: 10 * time.Millisecond})
 			for i := range tt.sends {
-				sender.Send(addr, enc(protocol.Commit{CommitNum: uint64(i)}))
+				sender.Send(addr, message.Commit{CommitNum: uint64(i)})
 			}
 
 			p := waitPeer(t, sender, func(p vsrstatus.Peer) bool {
@@ -425,10 +415,10 @@ func TestPeersStats(t *testing.T) {
 }
 
 func TestPeersSortedByAddr(t *testing.T) {
-	sender := newTransport(t, discard, vsrtcp.Options{})
+	sender := newTransport(t, func(message.Message) {}, vsrtcp.Options{})
 	addrs := []string{unusedAddr(t), unusedAddr(t), unusedAddr(t)}
 	for _, a := range addrs {
-		sender.Send(a, enc(protocol.Commit{}))
+		sender.Send(a, message.Commit{})
 	}
 	want := slices.Clone(addrs)
 	slices.Sort(want)
@@ -447,8 +437,8 @@ func TestPeersTrackReconnects(t *testing.T) {
 	srv1 := newTransport(t, h1, vsrtcp.Options{})
 	addr := listen(t, srv1)
 
-	client := newTransport(t, discard, vsrtcp.Options{Backoff: 10 * time.Millisecond})
-	client.Send(addr, enc(protocol.Commit{}))
+	client := newTransport(t, func(message.Message) {}, vsrtcp.Options{Backoff: 10 * time.Millisecond})
+	client.Send(addr, message.Commit{})
 	next(t, ch1)
 	waitPeer(t, client, func(p vsrstatus.Peer) bool { return p.Connected })
 
@@ -458,7 +448,7 @@ func TestPeersTrackReconnects(t *testing.T) {
 		t.Fatalf("Since = %v while disconnected", down.Since)
 	}
 
-	srv2 := newTransport(t, discard, vsrtcp.Options{})
+	srv2 := newTransport(t, func(message.Message) {}, vsrtcp.Options{})
 	if err := srv2.Listen(addr); err != nil {
 		t.Fatal(err)
 	}
@@ -472,20 +462,16 @@ func BenchmarkSend(b *testing.B) {
 	const window = 1 << 14
 	var received atomic.Int64
 
-	recv := vsrtcp.New(func(b []byte) error {
-		_, err := protocol.DecodeMessage(b)
-		received.Add(1)
-		return err
-	}, vsrtcp.Options{})
+	recv := vsrtcp.New(func(message.Message) { received.Add(1) }, vsrtcp.Options{})
 	b.Cleanup(func() { recv.Close() })
 	if err := recv.Listen("127.0.0.1:0"); err != nil {
 		b.Fatal(err)
 	}
-	send := vsrtcp.New(discard, vsrtcp.Options{QueueSize: 2 * window})
+	send := vsrtcp.New(func(message.Message) {}, vsrtcp.Options{QueueSize: 2 * window})
 	b.Cleanup(func() { send.Close() })
 
 	addr := recv.Addr().String()
-	m := protocol.PrepareOK{Epoch: 1, View: 1, OpNum: 1, Replica: 1}
+	m := message.PrepareOK{Epoch: 1, View: 1, OpNum: 1, Replica: 1}
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -493,7 +479,7 @@ func BenchmarkSend(b *testing.B) {
 		for int64(i)-received.Load() >= window {
 			runtime.Gosched()
 		}
-		send.Send(addr, enc(m))
+		send.Send(addr, m)
 	}
 	for received.Load() < int64(b.N) {
 		runtime.Gosched()

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/derinil/vsr/message"
 )
 
 const (
@@ -21,7 +23,7 @@ type envelope struct {
 	to       int
 	client   uint64
 	toClient bool
-	msg      Message
+	msg      message.Message
 }
 
 type execution struct {
@@ -62,7 +64,7 @@ type cluster struct {
 	control      map[string]bool
 	history      []execution
 	position     map[string]int
-	replies      []Reply
+	replies      []message.Reply
 	err          error
 	checkpoints  checkpointing
 	pagesTo      map[int]int
@@ -141,7 +143,7 @@ type simOutbox struct {
 	from int
 }
 
-func (o simOutbox) Send(to string, m Message) {
+func (o simOutbox) Send(to string, m message.Message) {
 	i, ok := o.c.addrIndex[to]
 	if !ok {
 		o.c.fail("send to unknown address %q", to)
@@ -150,7 +152,7 @@ func (o simOutbox) Send(to string, m Message) {
 	o.c.enqueue(envelope{from: o.from, to: i, msg: m})
 }
 
-func (o simOutbox) Reply(client uint64, m Message) {
+func (o simOutbox) Reply(client uint64, m message.Message) {
 	o.c.enqueue(envelope{from: o.from, to: -1, client: client, toClient: true, msg: m})
 }
 
@@ -294,7 +296,7 @@ func (c *cluster) observe(replica, pos int, op, result string) {
 	c.history = append(c.history, execution{op: op, result: result})
 }
 
-func (c *cluster) observeReply(m Reply) {
+func (c *cluster) observeReply(m message.Reply) {
 	key := opKey(m.ClientID, m.RequestNum)
 	pos, ok := c.position[key]
 	if !ok {
@@ -331,7 +333,7 @@ func (c *cluster) deliver(e envelope) {
 		c.receiveClient(e)
 		return
 	}
-	if p, ok := e.msg.(Pages); ok {
+	if p, ok := e.msg.(message.Pages); ok {
 		c.pagesTo[e.to] += len(p.Data)
 	}
 	if r := c.replicas[e.to]; r != nil {
@@ -341,9 +343,9 @@ func (c *cluster) deliver(e envelope) {
 
 func (c *cluster) receiveClient(e envelope) {
 	switch m := e.msg.(type) {
-	case Reply:
+	case message.Reply:
 		c.onReply(e.client, m)
-	case NewEpoch:
+	case message.NewEpoch:
 		c.onNewEpoch(e.client, m)
 	}
 }
@@ -355,7 +357,7 @@ func (c *cluster) client(id uint64) *simClient {
 	return c.clients[id-1]
 }
 
-func (c *cluster) onReply(id uint64, rep Reply) {
+func (c *cluster) onReply(id uint64, rep message.Reply) {
 	c.replies = append(c.replies, rep)
 	cl := c.client(id)
 	if c.control[opKey(id, rep.RequestNum)] {
@@ -373,7 +375,7 @@ func (c *cluster) onReply(id uint64, rep Reply) {
 	}
 }
 
-func (c *cluster) onControlReply(cl *simClient, rep Reply) {
+func (c *cluster) onControlReply(cl *simClient, rep message.Reply) {
 	if cl == nil || !cl.pending || rep.RequestNum != cl.issued {
 		return
 	}
@@ -386,7 +388,7 @@ func (c *cluster) onControlReply(cl *simClient, rep Reply) {
 	}
 }
 
-func (c *cluster) onNewEpoch(id uint64, m NewEpoch) {
+func (c *cluster) onNewEpoch(id uint64, m message.NewEpoch) {
 	cl := c.client(id)
 	if cl == nil || m.Epoch <= cl.epoch {
 		return
@@ -397,14 +399,14 @@ func (c *cluster) onNewEpoch(id uint64, m NewEpoch) {
 	}
 }
 
-func (c *cluster) message(cl *simClient) Message {
+func (c *cluster) message(cl *simClient) message.Message {
 	switch cl.kind {
 	case kindReconfig:
-		return Reconfiguration{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued, Config: cl.target}
+		return message.Reconfiguration{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued, Config: cl.target}
 	case kindCheck:
-		return CheckEpoch{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued}
+		return message.CheckEpoch{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued}
 	}
-	return Request{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued, Op: []byte(opKey(cl.id, cl.issued))}
+	return message.Request{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued, Op: []byte(opKey(cl.id, cl.issued))}
 }
 
 func (c *cluster) sendCurrent(cl *simClient) {
