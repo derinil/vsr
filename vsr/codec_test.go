@@ -1,6 +1,7 @@
 package vsr_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -27,18 +28,30 @@ func samples() []vsr.Message {
 		vsr.PrepareOK{Epoch: 1, View: 2, OpNum: 3, Replica: 2},
 		vsr.Commit{Epoch: 1, View: 2, CommitNum: 3},
 		vsr.StartViewChange{Epoch: 1, View: 9, Replica: 1},
-		vsr.DoViewChange{Epoch: 1, View: 9, LastNormalView: 4, OpNum: 7, CommitNum: 5, Log: entries, Replica: 3},
-		vsr.StartView{Epoch: 1, View: 9, OpNum: 7, CommitNum: 5, Log: entries},
-		vsr.Recovery{Epoch: 1, Nonce: 42, Replica: 0},
-		vsr.RecoveryResponse{Epoch: 1, View: 9, Nonce: 42, OpNum: 7, CommitNum: 5, Log: entries, HasLog: true, Config: config, OldConfig: config[:2], Replica: 2},
+		vsr.DoViewChange{Epoch: 1, View: 9, LastNormalView: 4, OpNum: 7, CommitNum: 5, Log: entries, Replica: 3, LogBase: 2},
+		vsr.StartView{Epoch: 1, View: 9, OpNum: 7, CommitNum: 5, Log: entries, LogBase: 4},
+		vsr.Recovery{Epoch: 1, Nonce: 42, Replica: 0, CheckpointNum: 6},
+		vsr.RecoveryResponse{Epoch: 1, View: 9, Nonce: 42, OpNum: 7, CommitNum: 5, Log: entries, HasLog: true, Config: config, OldConfig: config[:2], Replica: 2, LogBase: 3, EpochStart: 5},
 		vsr.GetState{Epoch: 1, View: 9, OpNum: 7, Replica: 1},
-		vsr.NewState{Epoch: 1, View: 9, OpNum: 7, CommitNum: 5, Log: entries[:1]},
+		vsr.NewState{Epoch: 1, View: 9, OpNum: 7, CommitNum: 5, Log: entries[:1], LogBase: 6},
 		vsr.StartEpoch{Epoch: 2, OpNum: 7, OldConfig: config[:2], NewConfig: config[1:], Replica: 1},
 		vsr.EpochStarted{Epoch: math.MaxUint64, Replica: math.MaxInt},
+		vsr.GetCheckpoint{MinOpNum: 100, From: config[0]},
+		vsr.CheckpointInfo{OpNum: 100, Size: 1 << 20, PageSize: 4096, Root: bytes.Repeat([]byte{0xAB}, 32), Clients: []byte{1, 2, 3}},
+		vsr.GetMerkle{OpNum: 100, Level: 3, Indices: []uint64{0, 1, math.MaxUint64}, From: config[1]},
+		vsr.MerkleNodes{OpNum: 100, Level: 3, Indices: []uint64{0, 1}, Hashes: bytes.Repeat([]byte{0xCD}, 64)},
+		vsr.GetPages{OpNum: 100, Indices: []uint64{5}, From: config[2]},
+		vsr.Pages{OpNum: 100, Indices: []uint64{5, 6}, Data: [][]byte{[]byte("page-a"), {0, 255}}},
 		vsr.Request{},
 		vsr.Prepare{Entry: vsr.Entry{Kind: vsr.EntryReconfig}},
 		vsr.DoViewChange{Replica: 0},
 		vsr.RecoveryResponse{},
+		vsr.GetCheckpoint{},
+		vsr.CheckpointInfo{},
+		vsr.GetMerkle{},
+		vsr.MerkleNodes{},
+		vsr.GetPages{},
+		vsr.Pages{},
 	}
 }
 
@@ -76,7 +89,7 @@ func TestRoundTrip(t *testing.T) {
 			}
 		})
 	}
-	for mt := vsr.MsgRequest; mt <= vsr.MsgEpochStarted; mt++ {
+	for mt := vsr.MsgRequest; mt <= vsr.MsgPages; mt++ {
 		if !seen[mt] {
 			t.Errorf("no sample for %s", mt)
 		}
@@ -91,7 +104,7 @@ func TestDecodeMalformed(t *testing.T) {
 	}{
 		{"empty", nil},
 		{"unknown type zero", []byte{0}},
-		{"unknown type after last", []byte{byte(vsr.MsgEpochStarted) + 1}},
+		{"unknown type after last", []byte{byte(vsr.MsgPages) + 1}},
 		{"unknown type 255", []byte{255}},
 		{"request huge op length", msg(vsr.MsgRequest, varints(1, 2, 3), huge)},
 		{"reconfiguration huge count", msg(vsr.MsgReconfiguration, varints(1, 2, 3), huge)},
@@ -100,6 +113,14 @@ func TestDecodeMalformed(t *testing.T) {
 		{"replica overflows int", msg(vsr.MsgStartViewChange, varints(1, 2, 1<<63))},
 		{"prepare invalid entry kind", msg(vsr.MsgPrepare, varints(1, 2, 3, 4), []byte{9})},
 		{"recovery response invalid bool", msg(vsr.MsgRecoveryResponse, varints(1, 2, 3, 4, 5, 0), []byte{2})},
+		{"get checkpoint huge from length", msg(vsr.MsgGetCheckpoint, varints(1), huge)},
+		{"checkpoint info page size overflows int", msg(vsr.MsgCheckpointInfo, varints(1, 2, 1<<63))},
+		{"checkpoint info huge root length", msg(vsr.MsgCheckpointInfo, varints(1, 2, 3), huge)},
+		{"get merkle huge index count", msg(vsr.MsgGetMerkle, varints(1, 2), huge)},
+		{"merkle nodes huge hash length", msg(vsr.MsgMerkleNodes, varints(1, 2, 0), huge)},
+		{"get pages huge index count", msg(vsr.MsgGetPages, varints(1), huge)},
+		{"pages huge data count", msg(vsr.MsgPages, varints(1, 0), huge)},
+		{"pages huge data element length", msg(vsr.MsgPages, varints(1, 1, 0), varints(1), huge)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,8 +204,10 @@ func TestMsgTypeString(t *testing.T) {
 		{vsr.MsgRequest, "Request"},
 		{vsr.MsgPrepareOK, "PrepareOK"},
 		{vsr.MsgEpochStarted, "EpochStarted"},
+		{vsr.MsgMerkleNodes, "MerkleNodes"},
+		{vsr.MsgPages, "Pages"},
 		{0, "MsgType(0)"},
-		{vsr.MsgEpochStarted + 1, "MsgType(18)"},
+		{vsr.MsgPages + 1, "MsgType(24)"},
 		{255, "MsgType(255)"},
 	}
 	for _, tc := range tests {

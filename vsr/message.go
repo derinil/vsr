@@ -23,6 +23,18 @@ const (
 	MsgNewState
 	MsgStartEpoch
 	MsgEpochStarted
+	// MsgGetCheckpoint requests a checkpoint at or after a given op.
+	MsgGetCheckpoint
+	// MsgCheckpointInfo describes the sender's latest checkpoint.
+	MsgCheckpointInfo
+	// MsgGetMerkle requests Merkle node hashes of a checkpoint.
+	MsgGetMerkle
+	// MsgMerkleNodes answers MsgGetMerkle.
+	MsgMerkleNodes
+	// MsgGetPages requests checkpoint pages.
+	MsgGetPages
+	// MsgPages answers MsgGetPages.
+	MsgPages
 )
 
 var msgTypeNames = [...]string{
@@ -43,6 +55,12 @@ var msgTypeNames = [...]string{
 	MsgNewState:         "NewState",
 	MsgStartEpoch:       "StartEpoch",
 	MsgEpochStarted:     "EpochStarted",
+	MsgGetCheckpoint:    "GetCheckpoint",
+	MsgCheckpointInfo:   "CheckpointInfo",
+	MsgGetMerkle:        "GetMerkle",
+	MsgMerkleNodes:      "MerkleNodes",
+	MsgGetPages:         "GetPages",
+	MsgPages:            "Pages",
 }
 
 func (t MsgType) String() string {
@@ -114,18 +132,21 @@ type DoViewChange struct {
 	Epoch, View, LastNormalView, OpNum, CommitNum uint64
 	Log                                           []Entry
 	Replica                                       int
+	LogBase                                       uint64
 }
 
 // StartView installs the new view's log on backups.
 type StartView struct {
 	Epoch, View, OpNum, CommitNum uint64
 	Log                           []Entry
+	LogBase                       uint64
 }
 
 // Recovery asks peers for state after a restart.
 type Recovery struct {
-	Epoch, Nonce uint64
-	Replica      int
+	Epoch, Nonce  uint64
+	Replica       int
+	CheckpointNum uint64
 }
 
 // RecoveryResponse answers Recovery; only the primary sets HasLog.
@@ -135,6 +156,7 @@ type RecoveryResponse struct {
 	HasLog                               bool
 	Config, OldConfig                    []string
 	Replica                              int
+	LogBase, EpochStart                  uint64
 }
 
 // GetState asks a peer for log entries after OpNum.
@@ -147,6 +169,7 @@ type GetState struct {
 type NewState struct {
 	Epoch, View, OpNum, CommitNum uint64
 	Log                           []Entry
+	LogBase                       uint64
 }
 
 // StartEpoch tells new replicas to begin an epoch.
@@ -160,6 +183,50 @@ type StartEpoch struct {
 type EpochStarted struct {
 	Epoch   uint64
 	Replica int
+}
+
+// GetCheckpoint asks for a checkpoint at or after MinOpNum.
+type GetCheckpoint struct {
+	MinOpNum uint64
+	From     string
+}
+
+// CheckpointInfo describes the sender's latest checkpoint.
+type CheckpointInfo struct {
+	OpNum, Size uint64
+	PageSize    int
+	Root        []byte
+	Clients     []byte
+}
+
+// GetMerkle asks for the Merkle node hashes at Level and Indices in checkpoint OpNum.
+type GetMerkle struct {
+	OpNum   uint64
+	Level   int
+	Indices []uint64
+	From    string
+}
+
+// MerkleNodes answers GetMerkle with a 32-byte hash per requested node.
+type MerkleNodes struct {
+	OpNum   uint64
+	Level   int
+	Indices []uint64
+	Hashes  []byte
+}
+
+// GetPages asks for the pages at Indices in checkpoint OpNum.
+type GetPages struct {
+	OpNum   uint64
+	Indices []uint64
+	From    string
+}
+
+// Pages answers GetPages with page contents.
+type Pages struct {
+	OpNum   uint64
+	Indices []uint64
+	Data    [][]byte
 }
 
 func (Request) Type() MsgType          { return MsgRequest }
@@ -179,6 +246,12 @@ func (GetState) Type() MsgType         { return MsgGetState }
 func (NewState) Type() MsgType         { return MsgNewState }
 func (StartEpoch) Type() MsgType       { return MsgStartEpoch }
 func (EpochStarted) Type() MsgType     { return MsgEpochStarted }
+func (GetCheckpoint) Type() MsgType    { return MsgGetCheckpoint }
+func (CheckpointInfo) Type() MsgType   { return MsgCheckpointInfo }
+func (GetMerkle) Type() MsgType        { return MsgGetMerkle }
+func (MerkleNodes) Type() MsgType      { return MsgMerkleNodes }
+func (GetPages) Type() MsgType         { return MsgGetPages }
+func (Pages) Type() MsgType            { return MsgPages }
 
 // ClientOf returns the client ID of a client-originated message.
 func ClientOf(m Message) (uint64, bool) {

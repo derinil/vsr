@@ -4,9 +4,12 @@ package kvservice
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 )
 
 // Result codes for failed operations.
@@ -16,7 +19,10 @@ const (
 	CodePreconditionFailed = 22
 )
 
-var errNotFound = errors.New("key does not exist")
+var (
+	errNotFound          = errors.New("key does not exist")
+	errMalformedSnapshot = errors.New("malformed snapshot")
+)
 
 // Op is an encoded operation. Kind is read, write or cas.
 type Op struct {
@@ -92,6 +98,46 @@ func (s *Store) Execute(op []byte) []byte {
 	}
 }
 
+// Snapshot encodes the store with keys in sorted order, so equal stores produce equal bytes.
+func (s *Store) Snapshot() []byte {
+	keys := slices.Sorted(maps.Keys(s.data))
+	b := binary.BigEndian.AppendUint32(nil, uint32(len(keys)))
+	for _, k := range keys {
+		b = appendBytes(b, []byte(k))
+		b = appendBytes(b, s.data[k])
+	}
+	return b
+}
+
+// Restore replaces the store's contents with a state encoded by Snapshot.
+func (s *Store) Restore(state []byte) error {
+	if len(state) < 4 {
+		return errMalformedSnapshot
+	}
+	n := binary.BigEndian.Uint32(state)
+	b := state[4:]
+	data := make(map[string][]byte)
+	for range n {
+		var k, v []byte
+		var ok bool
+		if k, b, ok = readBytes(b); !ok {
+			return errMalformedSnapshot
+		}
+		if v, b, ok = readBytes(b); !ok {
+			return errMalformedSnapshot
+		}
+		if _, dup := data[string(k)]; dup {
+			return errMalformedSnapshot
+		}
+		data[string(k)] = slices.Clone(v)
+	}
+	if len(b) > 0 {
+		return errMalformedSnapshot
+	}
+	s.data = data
+	return nil
+}
+
 // Read encodes a read of key.
 func Read(key any) ([]byte, error) {
 	k, err := raw(key)
@@ -149,6 +195,23 @@ func canonical(raw json.RawMessage) ([]byte, error) {
 func raw(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)
 	return b, err
+}
+
+func appendBytes(b, v []byte) []byte {
+	b = binary.BigEndian.AppendUint32(b, uint32(len(v)))
+	return append(b, v...)
+}
+
+func readBytes(b []byte) (v, rest []byte, ok bool) {
+	if len(b) < 4 {
+		return nil, nil, false
+	}
+	n := uint64(binary.BigEndian.Uint32(b))
+	b = b[4:]
+	if n > uint64(len(b)) {
+		return nil, nil, false
+	}
+	return b[:n], b[n:], true
 }
 
 func failure(code int, err error) []byte {

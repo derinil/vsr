@@ -67,16 +67,19 @@ func AppendMessage(dst []byte, m Message) []byte {
 		e.u64(m.CommitNum)
 		e.entries(m.Log)
 		e.int(m.Replica)
+		e.u64(m.LogBase)
 	case StartView:
 		e.u64(m.Epoch)
 		e.u64(m.View)
 		e.u64(m.OpNum)
 		e.u64(m.CommitNum)
 		e.entries(m.Log)
+		e.u64(m.LogBase)
 	case Recovery:
 		e.u64(m.Epoch)
 		e.u64(m.Nonce)
 		e.int(m.Replica)
+		e.u64(m.CheckpointNum)
 	case RecoveryResponse:
 		e.u64(m.Epoch)
 		e.u64(m.View)
@@ -88,6 +91,8 @@ func AppendMessage(dst []byte, m Message) []byte {
 		e.strings(m.Config)
 		e.strings(m.OldConfig)
 		e.int(m.Replica)
+		e.u64(m.LogBase)
+		e.u64(m.EpochStart)
 	case GetState:
 		e.u64(m.Epoch)
 		e.u64(m.View)
@@ -99,6 +104,7 @@ func AppendMessage(dst []byte, m Message) []byte {
 		e.u64(m.OpNum)
 		e.u64(m.CommitNum)
 		e.entries(m.Log)
+		e.u64(m.LogBase)
 	case StartEpoch:
 		e.u64(m.Epoch)
 		e.u64(m.OpNum)
@@ -108,6 +114,33 @@ func AppendMessage(dst []byte, m Message) []byte {
 	case EpochStarted:
 		e.u64(m.Epoch)
 		e.int(m.Replica)
+	case GetCheckpoint:
+		e.u64(m.MinOpNum)
+		e.str(m.From)
+	case CheckpointInfo:
+		e.u64(m.OpNum)
+		e.u64(m.Size)
+		e.int(m.PageSize)
+		e.bytes(m.Root)
+		e.bytes(m.Clients)
+	case GetMerkle:
+		e.u64(m.OpNum)
+		e.int(m.Level)
+		e.u64s(m.Indices)
+		e.str(m.From)
+	case MerkleNodes:
+		e.u64(m.OpNum)
+		e.int(m.Level)
+		e.u64s(m.Indices)
+		e.bytes(m.Hashes)
+	case GetPages:
+		e.u64(m.OpNum)
+		e.u64s(m.Indices)
+		e.str(m.From)
+	case Pages:
+		e.u64(m.OpNum)
+		e.u64s(m.Indices)
+		e.byteSlices(m.Data)
 	default:
 		panic(fmt.Sprintf("vsr: cannot encode %T", m))
 	}
@@ -146,32 +179,47 @@ func DecodeMessage(b []byte) (Message, error) {
 			CommitNum:      d.u64(),
 			Log:            d.entries(),
 			Replica:        d.int(),
+			LogBase:        d.u64(),
 		}
 	case MsgStartView:
-		m = StartView{Epoch: d.u64(), View: d.u64(), OpNum: d.u64(), CommitNum: d.u64(), Log: d.entries()}
+		m = StartView{Epoch: d.u64(), View: d.u64(), OpNum: d.u64(), CommitNum: d.u64(), Log: d.entries(), LogBase: d.u64()}
 	case MsgRecovery:
-		m = Recovery{Epoch: d.u64(), Nonce: d.u64(), Replica: d.int()}
+		m = Recovery{Epoch: d.u64(), Nonce: d.u64(), Replica: d.int(), CheckpointNum: d.u64()}
 	case MsgRecoveryResponse:
 		m = RecoveryResponse{
-			Epoch:     d.u64(),
-			View:      d.u64(),
-			Nonce:     d.u64(),
-			OpNum:     d.u64(),
-			CommitNum: d.u64(),
-			Log:       d.entries(),
-			HasLog:    d.boolean(),
-			Config:    d.strings(),
-			OldConfig: d.strings(),
-			Replica:   d.int(),
+			Epoch:      d.u64(),
+			View:       d.u64(),
+			Nonce:      d.u64(),
+			OpNum:      d.u64(),
+			CommitNum:  d.u64(),
+			Log:        d.entries(),
+			HasLog:     d.boolean(),
+			Config:     d.strings(),
+			OldConfig:  d.strings(),
+			Replica:    d.int(),
+			LogBase:    d.u64(),
+			EpochStart: d.u64(),
 		}
 	case MsgGetState:
 		m = GetState{Epoch: d.u64(), View: d.u64(), OpNum: d.u64(), Replica: d.int()}
 	case MsgNewState:
-		m = NewState{Epoch: d.u64(), View: d.u64(), OpNum: d.u64(), CommitNum: d.u64(), Log: d.entries()}
+		m = NewState{Epoch: d.u64(), View: d.u64(), OpNum: d.u64(), CommitNum: d.u64(), Log: d.entries(), LogBase: d.u64()}
 	case MsgStartEpoch:
 		m = StartEpoch{Epoch: d.u64(), OpNum: d.u64(), OldConfig: d.strings(), NewConfig: d.strings(), Replica: d.int()}
 	case MsgEpochStarted:
 		m = EpochStarted{Epoch: d.u64(), Replica: d.int()}
+	case MsgGetCheckpoint:
+		m = GetCheckpoint{MinOpNum: d.u64(), From: d.str()}
+	case MsgCheckpointInfo:
+		m = CheckpointInfo{OpNum: d.u64(), Size: d.u64(), PageSize: d.int(), Root: d.bytes(), Clients: d.bytes()}
+	case MsgGetMerkle:
+		m = GetMerkle{OpNum: d.u64(), Level: d.int(), Indices: d.u64s(), From: d.str()}
+	case MsgMerkleNodes:
+		m = MerkleNodes{OpNum: d.u64(), Level: d.int(), Indices: d.u64s(), Hashes: d.bytes()}
+	case MsgGetPages:
+		m = GetPages{OpNum: d.u64(), Indices: d.u64s(), From: d.str()}
+	case MsgPages:
+		m = Pages{OpNum: d.u64(), Indices: d.u64s(), Data: d.byteSlices()}
 	default:
 		return nil, ErrMalformed
 	}
@@ -235,6 +283,20 @@ func (e *encoder) entries(v []Entry) {
 	e.u64(uint64(len(v)))
 	for _, x := range v {
 		e.entry(x)
+	}
+}
+
+func (e *encoder) u64s(v []uint64) {
+	e.u64(uint64(len(v)))
+	for _, x := range v {
+		e.u64(x)
+	}
+}
+
+func (e *encoder) byteSlices(v [][]byte) {
+	e.u64(uint64(len(v)))
+	for _, x := range v {
+		e.bytes(x)
 	}
 }
 
@@ -348,4 +410,28 @@ func (d *decoder) entries() []Entry {
 		es[i] = d.entry()
 	}
 	return es
+}
+
+func (d *decoder) u64s() []uint64 {
+	n := d.count()
+	if n == 0 {
+		return nil
+	}
+	vs := make([]uint64, n)
+	for i := range vs {
+		vs[i] = d.u64()
+	}
+	return vs
+}
+
+func (d *decoder) byteSlices() [][]byte {
+	n := d.count()
+	if n == 0 {
+		return nil
+	}
+	vs := make([][]byte, n)
+	for i := range vs {
+		vs[i] = d.bytes()
+	}
+	return vs
 }

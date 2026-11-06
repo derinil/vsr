@@ -56,6 +56,12 @@ type Service interface {
 	Execute(op []byte) []byte
 }
 
+// Snapshotter is a Service that can capture and restore its state deterministically.
+type Snapshotter interface {
+	Snapshot() []byte
+	Restore(state []byte) error
+}
+
 // Outbox sends messages to replicas by address and replies to clients by ID.
 type Outbox interface {
 	Send(to string, m Message)

@@ -1,8 +1,13 @@
 package kvservice
 
 import (
+	"bytes"
 	"testing"
+
+	"github.com/derinil/vsr/vsr"
 )
+
+var _ vsr.Snapshotter = (*Store)(nil)
 
 type step struct {
 	op   string
@@ -202,5 +207,94 @@ func BenchmarkExecute(b *testing.B) {
 		s.Execute(write)
 		s.Execute(read)
 		s.Execute(cas)
+	}
+}
+
+func TestSnapshotRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		ops  []string
+	}{
+		{"empty", nil},
+		{"values", []string{
+			`{"k":"write","key":"a","value":1}`,
+			`{"k":"write","key":2,"value":{"x":[1,"y"]}}`,
+			`{"k":"write","key":"","value":null}`,
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := New()
+			for _, op := range tc.ops {
+				src.Execute([]byte(op))
+			}
+			snap := src.Snapshot()
+			dst := New()
+			dst.Execute([]byte(`{"k":"write","key":"stale","value":0}`))
+			if err := dst.Restore(snap); err != nil {
+				t.Fatal(err)
+			}
+			if got := dst.Snapshot(); !bytes.Equal(got, snap) {
+				t.Fatalf("restored snapshot = %q, want %q", got, snap)
+			}
+		})
+	}
+}
+
+func TestSnapshotDeterministic(t *testing.T) {
+	ops := []string{
+		`{"k":"write","key":"a","value":1}`,
+		`{"k":"write","key":"b","value":2}`,
+		`{"k":"write","key":"c","value":3}`,
+	}
+	tests := []struct {
+		name  string
+		order []int
+	}{
+		{"ascending", []int{0, 1, 2}},
+		{"descending", []int{2, 1, 0}},
+		{"shuffled", []int{1, 2, 0}},
+	}
+	want := []byte("\x00\x00\x00\x03\x00\x00\x00\x03\"a\"\x00\x00\x00\x011\x00\x00\x00\x03\"b\"\x00\x00\x00\x012\x00\x00\x00\x03\"c\"\x00\x00\x00\x013")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			for _, i := range tc.order {
+				s.Execute([]byte(ops[i]))
+			}
+			if got := s.Snapshot(); !bytes.Equal(got, want) {
+				t.Fatalf("snapshot = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRestoreMalformed(t *testing.T) {
+	tests := []struct {
+		name  string
+		state []byte
+	}{
+		{"nil", nil},
+		{"short count", []byte{0, 0, 1}},
+		{"entries missing", []byte{0, 0, 0, 1}},
+		{"key length past end", []byte{0, 0, 0, 1, 0, 0, 0, 5, 'a'}},
+		{"value missing", []byte{0, 0, 0, 1, 0, 0, 0, 1, 'a'}},
+		{"value length past end", []byte{0, 0, 0, 1, 0, 0, 0, 1, 'a', 0, 0, 0, 9, '1'}},
+		{"duplicate key", []byte("\x00\x00\x00\x02\x00\x00\x00\x01a\x00\x00\x00\x011\x00\x00\x00\x01a\x00\x00\x00\x012")},
+		{"huge key length", []byte{0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff}},
+		{"trailing byte", []byte("\x00\x00\x00\x01\x00\x00\x00\x01a\x00\x00\x00\x011\x00")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			s.Execute([]byte(`{"k":"write","key":"keep","value":7}`))
+			before := s.Snapshot()
+			if err := s.Restore(tc.state); err == nil {
+				t.Fatal("expected error")
+			}
+			if got := s.Snapshot(); !bytes.Equal(got, before) {
+				t.Fatalf("failed restore changed store: %q", got)
+			}
+		})
 	}
 }
