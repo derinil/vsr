@@ -51,6 +51,24 @@
         <div id="cards" class="cards"></div>
       </section>
     </div>
+
+    <section id="config" class="panel" aria-label="Configuration">
+      <div class="panel-head">
+        <h2>Configuration</h2>
+        <span id="config-epoch" class="muted"></span>
+      </div>
+      <ol id="config-members" class="members"></ol>
+      <form id="config-add" class="config-add">
+        <input id="config-input" type="text" disabled placeholder="host:port" autocomplete="off" spellcheck="false" aria-label="Replica address to add">
+        <button type="submit" disabled>Add</button>
+      </form>
+      <div id="config-spares" class="spares"></div>
+      <div class="config-actions">
+        <button id="config-apply" class="btn-primary" type="button" disabled>Apply</button>
+        <button id="config-reset" type="button" hidden>Reset</button>
+        <span id="config-msg" class="config-msg" role="status">Waiting for data</span>
+      </div>
+    </section>
   </main>
 
   <div id="tip" class="tip" role="tooltip" hidden></div>

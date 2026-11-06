@@ -13,6 +13,8 @@ const GAP = 5;
 const SPARK_W = 240;
 const SPARK_H = 40;
 const CONN_LABEL = { live: 'Live', reconnecting: 'Reconnecting', demo: 'Demo' };
+const MIN_CONFIG = 3;
+const ADDR_RE = /^\S+:\d+$/;
 
 const DEMO_ADDRS = ['r1:7000', 'r2:7000', 'r3:7000', 'r4:7000', 'r5:7000'];
 const DEMO_EPOCH = 3;
@@ -41,6 +43,12 @@ const state = {
   pointer: null,
   received: 0,
   conn: 'reconnecting',
+  spares: [],
+  live: { config: [], epoch: 0 },
+  draft: null,
+  applying: false,
+  configMsg: null,
+  configKey: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -94,6 +102,7 @@ const s = (tag, attrs, ...kids) => build(document.createElementNS(SVG_NS, tag), 
 function applyCluster(cluster) {
   const now = ts(cluster.time) || Date.now();
   state.targets = cluster.targets;
+  state.spares = cluster.spares ?? [];
   for (const target of cluster.targets) {
     if (!target.node) continue;
     state.addrOf.set(target.url, target.node.addr);
@@ -155,9 +164,16 @@ function buildModel() {
     nodes: layoutNodes(addrs, byAddr),
     edges: buildEdges(replicas),
     summary: summarize(replicas, up),
+    live: liveConfig(up),
     maxCommit: max(up.map((rep) => rep.node.commitNum)),
     maxLog: max(up.map((rep) => rep.node.logLen)),
   };
+}
+
+function liveConfig(up) {
+  const members = up.filter((rep) => rep.node.status !== 'shutdown' && rep.node.config?.length);
+  const best = members.reduce((a, b) => (b.node.epoch > (a?.node.epoch ?? -1) ? b : a), null);
+  return best ? { config: best.node.config, epoch: best.node.epoch } : { config: [], epoch: 0 };
 }
 
 function configOrder(replicas) {
@@ -278,6 +294,7 @@ function render() {
   renderSummary(model);
   renderGraph(model);
   renderCards(model);
+  renderConfig(model);
   renderStatus();
 }
 
@@ -635,6 +652,142 @@ function cardNotice(rep) {
   return h('p', { class: 'card-notice' }, `${rep.target.error || 'unreachable'} · ${seen}`);
 }
 
+const sameList = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+function renderConfig({ live }) {
+  state.live = live;
+  if (state.draft && sameList(state.draft, live.config)) state.draft = null;
+  const draft = state.draft ?? live.config;
+  const changed = state.draft !== null;
+  const removed = live.config.filter((addr) => !draft.includes(addr));
+  const added = draft.filter((addr) => !live.config.includes(addr));
+  const spares = state.spares.filter((addr) => !draft.includes(addr));
+  const demo = state.conn === 'demo';
+  const locked = demo || state.applying || !live.config.length;
+  const msg = configMessage({ demo, changed, draft, added, removed, live });
+  const key = JSON.stringify([draft, removed, added, spares, locked, msg, live]);
+  if (key === state.configKey) return;
+  state.configKey = key;
+
+  $('config-epoch').textContent = live.config.length ? `epoch ${int(live.epoch)} · ${live.config.length} members` : '';
+  $('config-members').replaceChildren(
+    ...draft.map((addr) => memberEl(addr, added.includes(addr) ? 'new' : null, locked)),
+    ...removed.map((addr) => memberEl(addr, 'removed', locked)),
+  );
+  $('config-spares').replaceChildren(
+    ...(spares.length
+      ? [
+          h('span', { class: 'muted' }, 'Spares'),
+          ...spares.map((addr) =>
+            h('button', { type: 'button', class: 'spare', 'data-add': addr, disabled: locked }, `+ ${addr}`),
+          ),
+        ]
+      : []),
+  );
+  $('config-input').disabled = locked;
+  $('config-add').querySelector('button').disabled = locked;
+  $('config-apply').disabled = locked || !changed || draft.length < MIN_CONFIG;
+  $('config-apply').textContent = state.applying ? 'Applying…' : 'Apply';
+  $('config-reset').hidden = !changed || state.applying;
+  $('config-msg').textContent = msg.text;
+  $('config-msg').dataset.tone = msg.tone ?? '';
+}
+
+function configMessage({ demo, changed, draft, added, removed, live }) {
+  if (demo) return { text: 'Reconfiguration is not available in demo mode' };
+  if (!live.config.length) return { text: 'Waiting for a reachable replica' };
+  if (state.applying) return { text: 'Reconfiguring; this waits until the new epoch is active' };
+  if (state.configMsg) return state.configMsg;
+  if (!changed) return { text: '' };
+  if (draft.length < MIN_CONFIG) return { text: `A configuration needs at least ${MIN_CONFIG} replicas`, tone: 'warn' };
+  const parts = [added.length && `${added.length} to add`, removed.length && `${removed.length} to remove`].filter(Boolean);
+  return { text: `${parts.join(', ') || 'Reordered'}. New members must already be running as joining replicas.` };
+}
+
+function memberEl(addr, tag, locked) {
+  const removed = tag === 'removed';
+  return h(
+    'li',
+    { class: cls('member', removed && 'is-removed') },
+    h('span', { class: 'addr' }, addr),
+    tag && h('span', { class: cls('tag', `tag-${tag}`) }, tag),
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'icon-btn',
+        disabled: locked,
+        'data-add': removed ? addr : null,
+        'data-remove': removed ? null : addr,
+        'aria-label': `${removed ? 'Keep' : 'Remove'} ${addr}`,
+        title: removed ? 'Keep' : 'Remove',
+      },
+      removed ? '↺' : '×',
+    ),
+  );
+}
+
+function editConfig(change) {
+  state.draft = change(state.draft ?? [...state.live.config]);
+  state.configMsg = null;
+  render();
+}
+
+function addMember(event) {
+  event.preventDefault();
+  const input = $('config-input');
+  const addr = input.value.trim();
+  if (!addr) return;
+  const draft = state.draft ?? state.live.config;
+  if (!ADDR_RE.test(addr)) state.configMsg = { text: `"${addr}" is not a host:port address`, tone: 'bad' };
+  else if (draft.includes(addr)) state.configMsg = { text: `${addr} is already a member`, tone: 'warn' };
+  else {
+    input.value = '';
+    editConfig((d) => [...d, addr]);
+    return;
+  }
+  render();
+}
+
+function onConfigClick(event) {
+  const remove = event.target.closest('[data-remove]');
+  const add = event.target.closest('[data-add]');
+  if (remove && !remove.disabled) editConfig((d) => d.filter((addr) => addr !== remove.dataset.remove));
+  else if (add && !add.disabled) editConfig((d) => [...d, add.dataset.add]);
+}
+
+function resetConfig() {
+  state.draft = null;
+  state.configMsg = null;
+  render();
+}
+
+async function applyConfig() {
+  const config = state.draft;
+  if (!config || state.applying) return;
+  state.applying = true;
+  state.configMsg = null;
+  render();
+  try {
+    const response = await fetch('api/reconfigure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) {
+      state.draft = null;
+      state.configMsg = { text: `Reconfigured: now in epoch ${int(body.epoch)}`, tone: 'ok' };
+    } else {
+      state.configMsg = { text: body.error || `Request failed (${response.status})`, tone: 'bad' };
+    }
+  } catch {
+    state.configMsg = { text: 'Request failed: monitor unreachable', tone: 'bad' };
+  }
+  state.applying = false;
+  render();
+}
+
 function toggleSelect(addr) {
   state.selected = state.selected === addr ? null : addr;
   render();
@@ -654,6 +807,11 @@ function bindEvents() {
     refreshTip();
   });
   graph.addEventListener('click', selectFrom);
+
+  $('config').addEventListener('click', onConfigClick);
+  $('config-add').addEventListener('submit', addMember);
+  $('config-apply').addEventListener('click', applyConfig);
+  $('config-reset').addEventListener('click', resetConfig);
 
   const cards = $('cards');
   cards.addEventListener('click', selectFrom);

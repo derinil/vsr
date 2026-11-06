@@ -25,7 +25,7 @@ func healthyHandler(t *testing.T) http.HandlerFunc {
 }
 
 func testMonitor(nodes ...string) *Monitor {
-	return New(nodes, time.Second, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(Options{Nodes: nodes, Interval: time.Second, Timeout: 200 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
 func startNode(t *testing.T, h http.HandlerFunc, down bool) string {

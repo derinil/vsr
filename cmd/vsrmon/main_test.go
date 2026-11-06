@@ -37,6 +37,12 @@ func TestParseOptions(t *testing.T) {
 			env:  map[string]string{"VSR_MON_NODES": "b:2", "VSR_MON_LISTEN": ":6000"},
 			want: options{nodes: []string{"https://a:1"}, listen: ":7000", interval: time.Second, timeout: 2 * time.Second},
 		},
+		{
+			name: "spares and status port",
+			env:  map[string]string{"VSR_MON_NODES": "a:1", "VSR_MON_SPARES": "s1:2, s2:2", "VSR_MON_STATUS_PORT": "8080"},
+			want: options{nodes: []string{"http://a:1"}, spares: []string{"s1:2", "s2:2"}, statusPort: 8080, listen: ":8080", interval: 500 * time.Millisecond, timeout: 300 * time.Millisecond},
+		},
+		{name: "bad status port", args: []string{"-nodes", "a:1", "-status-port", "70000"}, wantErr: true},
 		{name: "missing nodes", wantErr: true},
 		{name: "blank nodes", args: []string{"-nodes", " , "}, wantErr: true},
 		{name: "zero interval", args: []string{"-nodes", "a:1", "-interval", "0"}, wantErr: true},
@@ -76,5 +82,18 @@ func TestNormalizeNodes(t *testing.T) {
 				t.Errorf("normalizeNodes(%q) = %q, want %q", tt.items, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStatusURL(t *testing.T) {
+	if statusURL(0) != nil {
+		t.Fatal("statusURL(0) should be nil")
+	}
+	f := statusURL(8080)
+	tests := map[string]string{"vsr6:10188": "http://vsr6:8080", "[::1]:1": "http://[::1]:8080", "bad": ""}
+	for addr, want := range tests {
+		if got := f(addr); got != want {
+			t.Errorf("statusURL(8080)(%q) = %q, want %q", addr, got, want)
+		}
 	}
 }

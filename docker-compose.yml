@@ -49,6 +49,26 @@ services:
     ports:
       - "10192:10188"
 
+  vsr6:
+    <<: *replica
+    profiles: [spare]
+    environment:
+      <<: *env
+      VSR_ADDR: vsr6:10188
+      VSR_JOIN: "true"
+    ports:
+      - "10193:10188"
+
+  vsr7:
+    <<: *replica
+    profiles: [spare]
+    environment:
+      <<: *env
+      VSR_ADDR: vsr7:10188
+      VSR_JOIN: "true"
+    ports:
+      - "10194:10188"
+
   vsrmon:
     image: vsr:latest
     restart: "no"
@@ -57,5 +77,7 @@ services:
     entrypoint: ["vsrmon"]
     environment:
       VSR_MON_NODES: vsr1:8080,vsr2:8080,vsr3:8080,vsr4:8080,vsr5:8080
+      VSR_MON_SPARES: vsr6:10188,vsr7:10188
+      VSR_MON_STATUS_PORT: "8080"
     ports:
       - "8080:8080"

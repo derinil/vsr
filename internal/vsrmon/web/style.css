@@ -460,6 +460,167 @@ h2 {
   font-weight: 700;
 }
 
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  padding: 6px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button:disabled,
+input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-fill);
+  font-weight: 600;
+}
+
+.members {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  padding: 0;
+  margin: 0 0 12px;
+  list-style: none;
+  counter-reset: member;
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 6px 6px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.member:not(.is-removed)::before {
+  counter-increment: member;
+  content: counter(member);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.member .addr {
+  flex: 1;
+  min-width: 0;
+}
+
+.member.is-removed .addr {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.tag {
+  flex: none;
+  padding: 1px 8px;
+  font-size: 12px;
+  border-radius: 999px;
+}
+
+.tag-new {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.tag-removed {
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+}
+
+.icon-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  line-height: 1;
+}
+
+.config-add {
+  display: flex;
+  gap: 8px;
+  max-width: 420px;
+  margin-bottom: 10px;
+}
+
+.config-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.spares {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.spares:empty {
+  display: none;
+}
+
+.spare {
+  padding: 3px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-style: dashed;
+}
+
+.config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.config-msg {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.config-msg[data-tone="ok"] {
+  color: var(--ok);
+}
+
+.config-msg[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.config-msg[data-tone="bad"] {
+  color: var(--bad);
+}
+
 .cards {
   display: grid;
   gap: 12px;

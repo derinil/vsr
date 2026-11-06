@@ -50,4 +50,5 @@ type Target struct {
 type Cluster struct {
 	Time    time.Time `json:"time"`
 	Targets []Target  `json:"targets"`
+	Spares  []string  `json:"spares,omitempty"`
 }

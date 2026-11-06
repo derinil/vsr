@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +29,8 @@ func TestParseOptions(t *testing.T) {
 			name: "defaults",
 			want: options{
 				replicas: []string{"127.0.0.1:10188", "127.0.0.1:10189", "127.0.0.1:10190", "127.0.0.1:10191", "127.0.0.1:10192"},
-				status:   []string{"127.0.0.1:18080", "127.0.0.1:18081", "127.0.0.1:18082", "127.0.0.1:18083", "127.0.0.1:18084"},
+				spares:   []string{"127.0.0.1:10193", "127.0.0.1:10194"},
+				status:   []string{"127.0.0.1:18080", "127.0.0.1:18081", "127.0.0.1:18082", "127.0.0.1:18083", "127.0.0.1:18084", "127.0.0.1:18085", "127.0.0.1:18086"},
 				listen:   ":9999",
 				minWait:  time.Second,
 				maxWait:  3 * time.Second,
@@ -38,7 +40,7 @@ func TestParseOptions(t *testing.T) {
 		},
 		{
 			name: "custom",
-			args: []string{"-replicas", "3", "-port", "2000", "-status-port", "3000", "-listen", ":9", "-min-interval", "2s", "-max-interval", "2s", "-keys", "1", "-timeout", "1s"},
+			args: []string{"-replicas", "3", "-spares", "0", "-port", "2000", "-status-port", "3000", "-listen", ":9", "-min-interval", "2s", "-max-interval", "2s", "-keys", "1", "-timeout", "1s"},
 			want: options{
 				replicas: []string{"127.0.0.1:2000", "127.0.0.1:2001", "127.0.0.1:2002"},
 				status:   []string{"127.0.0.1:3000", "127.0.0.1:3001", "127.0.0.1:3002"},
@@ -50,6 +52,7 @@ func TestParseOptions(t *testing.T) {
 			},
 		},
 		{name: "no replicas", args: []string{"-replicas", "0"}, wantErr: true},
+		{name: "negative spares", args: []string{"-spares", "-1"}, wantErr: true},
 		{name: "max below min", args: []string{"-min-interval", "2s", "-max-interval", "1s"}, wantErr: true},
 		{name: "zero min", args: []string{"-min-interval", "0"}, wantErr: true},
 		{name: "no keys", args: []string{"-keys", "0"}, wantErr: true},
@@ -126,12 +129,13 @@ func freeAddrs(t *testing.T, n int) []string {
 }
 
 func TestRun(t *testing.T) {
-	const n = 5
-	addrs := freeAddrs(t, 2*n+1)
+	const n, spares = 5, 2
+	addrs := freeAddrs(t, 2*(n+spares)+1)
 	o := options{
 		replicas: addrs[:n],
-		status:   addrs[n : 2*n],
-		listen:   addrs[2*n],
+		spares:   addrs[n : n+spares],
+		status:   addrs[n+spares : 2*(n+spares)],
+		listen:   addrs[2*(n+spares)],
 		minWait:  20 * time.Millisecond,
 		maxWait:  50 * time.Millisecond,
 		keys:     3,
@@ -145,13 +149,40 @@ func TestRun(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, o, logger) }()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for !clusterHealthy(o.listen, n) || strings.Count(logs.String(), "msg=query ") < 3 {
-		if time.Now().After(deadline) {
-			t.Fatalf("cluster not serving queries; logs:\n%s", logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
+	eventually(t, &logs, o.listen, "cluster serving queries", func(c vsrstatus.Cluster) bool {
+		return allReachable(c, n) && strings.Count(logs.String(), "msg=query ") >= 3
+	})
+
+	config := append(slices.Clone(o.replicas[2:]), o.spares...)
+	body, _ := json.Marshal(map[string][]string{"config": config})
+	resp, err := http.Post("http://"+o.listen+"/api/reconfigure", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
 	}
+	var got struct {
+		Epoch uint64 `json:"epoch"`
+		Error string `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || got.Epoch != 1 {
+		t.Fatalf("reconfigure = %d %+v, want 200 epoch 1; logs:\n%s", resp.StatusCode, got, logs.String())
+	}
+
+	start := time.Now()
+	resp, err = http.Post("http://"+o.listen+"/api/reconfigure", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || time.Since(start) > time.Second {
+		t.Fatalf("repeated reconfigure = %d after %v, want fast 400", resp.StatusCode, time.Since(start))
+	}
+
+	before := strings.Count(logs.String(), "msg=query ")
+	eventually(t, &logs, o.listen, "new members polled and serving", func(c vsrstatus.Cluster) bool {
+		return allReachable(c, n+spares) && membersNormal(c, config) && strings.Count(logs.String(), "msg=query ") >= before+3
+	})
 	if strings.Contains(logs.String(), "query failed") {
 		t.Errorf("unexpected failed query; logs:\n%s", logs.String())
 	}
@@ -167,14 +198,33 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func clusterHealthy(listen string, n int) bool {
+func eventually(t *testing.T, logs *syncBuffer, listen, what string, ok func(vsrstatus.Cluster) bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if c, err := fetchCluster(listen); err == nil && ok(c) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s; logs:\n%s", what, logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func fetchCluster(listen string) (vsrstatus.Cluster, error) {
+	var c vsrstatus.Cluster
 	resp, err := http.Get("http://" + listen + "/api/cluster")
 	if err != nil {
-		return false
+		return c, err
 	}
 	defer resp.Body.Close()
-	var c vsrstatus.Cluster
-	if json.NewDecoder(resp.Body).Decode(&c) != nil || len(c.Targets) != n {
+	err = json.NewDecoder(resp.Body).Decode(&c)
+	return c, err
+}
+
+func allReachable(c vsrstatus.Cluster, n int) bool {
+	if len(c.Targets) != n {
 		return false
 	}
 	for _, tg := range c.Targets {
@@ -183,4 +233,14 @@ func clusterHealthy(listen string, n int) bool {
 		}
 	}
 	return true
+}
+
+func membersNormal(c vsrstatus.Cluster, config []string) bool {
+	normal := 0
+	for _, tg := range c.Targets {
+		if tg.Node != nil && tg.Node.Epoch == 1 && tg.Node.Status == "normal" && slices.Contains(config, tg.Node.Addr) {
+			normal++
+		}
+	}
+	return normal == len(config)
 }

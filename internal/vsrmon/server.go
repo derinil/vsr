@@ -23,6 +23,7 @@ func newHandler(m *Monitor) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/cluster", m.serveCluster)
 	mux.HandleFunc("GET /api/stream", m.serveStream)
+	mux.HandleFunc("POST /api/reconfigure", m.serveReconfigure)
 	mux.Handle("GET /", http.FileServerFS(site))
 	return mux, nil
 }
@@ -90,7 +91,7 @@ func Serve(ctx context.Context, m *Monitor, listen string, logger *slog.Logger) 
 	go m.Run(ctx)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
-	logger.Info("dashboard listening", "addr", ln.Addr().String(), "nodes", len(m.nodes))
+	logger.Info("dashboard listening", "addr", ln.Addr().String(), "nodes", len(m.opts.Nodes))
 
 	select {
 	case err := <-errc:

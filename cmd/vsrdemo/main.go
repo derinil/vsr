@@ -1,5 +1,6 @@
-// Command vsrdemo runs a local key-value cluster, a client issuing random
-// queries every few seconds, and the monitor dashboard in one process.
+// Command vsrdemo runs a local key-value cluster, spare replicas ready to join
+// it, a client issuing random queries every few seconds, and the monitor
+// dashboard in one process.
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -37,6 +39,7 @@ func main() {
 
 type options struct {
 	replicas []string
+	spares   []string
 	status   []string
 	listen   string
 	minWait  time.Duration
@@ -47,8 +50,9 @@ type options struct {
 
 func parseOptions(args []string) (options, error) {
 	fs := flag.NewFlagSet("vsrdemo", flag.ExitOnError)
-	n := fs.Int("replicas", 5, "number of replicas")
-	port := fs.Int("port", vsr.DefaultPort, "first replica port; replica i listens on port+i")
+	n := fs.Int("replicas", 5, "number of replicas in the initial configuration")
+	spares := fs.Int("spares", 2, "number of extra replicas waiting to join through a reconfiguration")
+	port := fs.Int("port", vsr.DefaultPort, "first replica port; replica i, spares last, listens on port+i")
 	statusPort := fs.Int("status-port", 18080, "first status port; replica i serves GET /status on status-port+i")
 	listen := fs.String("listen", ":9999", "dashboard listen address")
 	minWait := fs.Duration("min-interval", time.Second, "minimum delay between queries")
@@ -60,6 +64,8 @@ func parseOptions(args []string) (options, error) {
 	switch {
 	case *n < 1:
 		return options{}, errors.New("-replicas must be positive")
+	case *spares < 0:
+		return options{}, errors.New("-spares must not be negative")
 	case *minWait <= 0 || *maxWait < *minWait:
 		return options{}, errors.New("need 0 < -min-interval <= -max-interval")
 	case *keys < 1:
@@ -68,8 +74,13 @@ func parseOptions(args []string) (options, error) {
 		return options{}, errors.New("-timeout must be positive")
 	}
 	o := options{listen: *listen, minWait: *minWait, maxWait: *maxWait, keys: *keys, timeout: *timeout}
-	for i := range *n {
-		o.replicas = append(o.replicas, fmt.Sprintf("127.0.0.1:%d", *port+i))
+	for i := range *n + *spares {
+		addr := fmt.Sprintf("127.0.0.1:%d", *port+i)
+		if i < *n {
+			o.replicas = append(o.replicas, addr)
+		} else {
+			o.spares = append(o.spares, addr)
+		}
 		o.status = append(o.status, fmt.Sprintf("127.0.0.1:%d", *statusPort+i))
 	}
 	return o, nil
@@ -86,13 +97,15 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 		}
 	}
 
-	urls := make([]string, len(o.status))
-	for i, addr := range o.replicas {
+	all := slices.Concat(o.replicas, o.spares)
+	urls := make(map[string]string, len(all))
+	for i, addr := range all {
 		r, err := vsr.NewReplica(vsr.ReplicaOptions{
 			Addr:     addr,
 			Listen:   addr,
 			HTTPAddr: o.status[i],
 			Config:   o.replicas,
+			Join:     i >= len(o.replicas),
 			Service:  kvservice.New(),
 			Logger:   logger,
 		})
@@ -101,7 +114,7 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 			return err
 		}
 		wg.Go(func() { fail(r.Run(ctx)) })
-		urls[i] = "http://" + o.status[i]
+		urls[addr] = "http://" + o.status[i]
 	}
 
 	cl, err := vsr.NewClient(vsr.ClientOptions{Config: o.replicas})
@@ -111,7 +124,18 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 	}
 	defer cl.Close()
 
-	mon := vsrmon.New(urls, 500*time.Millisecond, 300*time.Millisecond, logger)
+	nodes := make([]string, len(o.replicas))
+	for i, addr := range o.replicas {
+		nodes[i] = urls[addr]
+	}
+	mon := vsrmon.New(vsrmon.Options{
+		Nodes:     nodes,
+		Spares:    o.spares,
+		StatusURL: func(addr string) string { return urls[addr] },
+		Interval:  500 * time.Millisecond,
+		Timeout:   300 * time.Millisecond,
+		Logger:    logger,
+	})
 	wg.Go(func() { fail(vsrmon.Serve(ctx, mon, o.listen, logger)) })
 	wg.Go(func() { query(ctx, cl, o, logger) })
 
