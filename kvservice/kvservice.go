@@ -1,3 +1,5 @@
+// Package kvservice is a JSON key-value vsr.Service supporting read, write
+// and compare-and-swap.
 package kvservice
 
 import (
@@ -7,6 +9,7 @@ import (
 	"fmt"
 )
 
+// Result codes for failed operations.
 const (
 	CodeMalformed          = 12
 	CodeNotFound           = 20
@@ -15,6 +18,7 @@ const (
 
 var errNotFound = errors.New("key does not exist")
 
+// Op is an encoded operation. Kind is read, write or cas.
 type Op struct {
 	Kind  string          `json:"k"`
 	Key   json.RawMessage `json:"key"`
@@ -23,20 +27,24 @@ type Op struct {
 	To    json.RawMessage `json:"to,omitempty"`
 }
 
+// Result is an operation's outcome; non-zero Code means failure.
 type Result struct {
 	Code  int             `json:"code,omitempty"`
 	Value json.RawMessage `json:"value,omitempty"`
 	Error string          `json:"error,omitempty"`
 }
 
+// Store is an in-memory key-value Service.
 type Store struct {
 	data map[string][]byte
 }
 
+// New returns an empty Store.
 func New() *Store {
 	return &Store{data: make(map[string][]byte)}
 }
 
+// Execute applies op and returns an encoded Result.
 func (s *Store) Execute(op []byte) []byte {
 	var o Op
 	if err := json.Unmarshal(op, &o); err != nil {
@@ -84,6 +92,7 @@ func (s *Store) Execute(op []byte) []byte {
 	}
 }
 
+// Read encodes a read of key.
 func Read(key any) ([]byte, error) {
 	k, err := raw(key)
 	if err != nil {
@@ -92,6 +101,7 @@ func Read(key any) ([]byte, error) {
 	return json.Marshal(Op{Kind: "read", Key: k})
 }
 
+// Write encodes a write of value to key.
 func Write(key, value any) ([]byte, error) {
 	k, err := raw(key)
 	if err != nil {
@@ -104,6 +114,7 @@ func Write(key, value any) ([]byte, error) {
 	return json.Marshal(Op{Kind: "write", Key: k, Value: v})
 }
 
+// CAS encodes a compare-and-swap of key from from to to.
 func CAS(key, from, to any) ([]byte, error) {
 	k, err := raw(key)
 	if err != nil {
@@ -120,6 +131,7 @@ func CAS(key, from, to any) ([]byte, error) {
 	return json.Marshal(Op{Kind: "cas", Key: k, From: f, To: t})
 }
 
+// DecodeResult decodes a Result returned by Execute.
 func DecodeResult(b []byte) (Result, error) {
 	var r Result
 	err := json.Unmarshal(b, &r)

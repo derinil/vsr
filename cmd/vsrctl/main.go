@@ -1,3 +1,4 @@
+// Command vsrctl operates a VR cluster.
 package main
 
 import (

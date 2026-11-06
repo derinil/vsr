@@ -1,3 +1,4 @@
+// Command vsrmaelstrom is a Maelstrom lin-kv node that proxies to a VR cluster.
 package main
 
 import (

@@ -1,3 +1,4 @@
+// Package vsrclient is a client for a VR cluster.
 package vsrclient
 
 import (
@@ -15,15 +16,23 @@ import (
 
 const defaultRequestTimeout = 500 * time.Millisecond
 
+// ErrClosed is returned by calls on a closed Client.
 var ErrClosed = errors.New("vsrclient: closed")
 
+// Options configures a Client.
 type Options struct {
-	Config         []string
-	NewTransport   func(h vsr.Handler) vsr.Transport
-	ClientID       uint64
+	// Config lists replica addresses in canonical order.
+	Config []string
+	// NewTransport creates the client's transport.
+	NewTransport func(h vsr.Handler) vsr.Transport
+	// ClientID identifies the client; zero picks a random ID.
+	ClientID uint64
+	// RequestTimeout is how long to wait before retrying with all replicas.
 	RequestTimeout time.Duration
 }
 
+// Client sends requests to a cluster one at a time, following view and
+// epoch changes. It is safe for concurrent use.
 type Client struct {
 	id        uint64
 	timeout   time.Duration
@@ -45,6 +54,7 @@ type Client struct {
 
 type buildFunc func(epoch, requestNum uint64) vsr.Message
 
+// New returns a Client for o.Config.
 func New(o Options) (*Client, error) {
 	if len(o.Config) == 0 {
 		return nil, errors.New("vsrclient: empty config")
@@ -79,6 +89,7 @@ func New(o Options) (*Client, error) {
 	return c, nil
 }
 
+// Invoke executes op on the cluster and returns its result.
 func (c *Client) Invoke(ctx context.Context, op []byte) ([]byte, error) {
 	if err := c.acquire(ctx); err != nil {
 		return nil, err
@@ -93,6 +104,8 @@ func (c *Client) Invoke(ctx context.Context, op []byte) ([]byte, error) {
 	return r.Result, nil
 }
 
+// Reconfigure moves the cluster to config, which needs at least 3 replicas,
+// and waits until the new epoch is active.
 func (c *Client) Reconfigure(ctx context.Context, config []string) error {
 	if len(config) < 3 {
 		return fmt.Errorf("vsrclient: reconfiguration needs at least 3 replicas, got %d", len(config))
@@ -125,28 +138,33 @@ func (c *Client) Reconfigure(ctx context.Context, config []string) error {
 	return err
 }
 
+// ID returns the client ID.
 func (c *Client) ID() uint64 {
 	return c.id
 }
 
+// View returns the last known view.
 func (c *Client) View() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.view
 }
 
+// Epoch returns the last known epoch.
 func (c *Client) Epoch() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.epoch
 }
 
+// Config returns the last known configuration.
 func (c *Client) Config() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.config)
 }
 
+// Close closes the client and its transport.
 func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {

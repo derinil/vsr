@@ -8,8 +8,10 @@ import (
 	"slices"
 )
 
+// ErrMalformed is returned by DecodeMessage for invalid input.
 var ErrMalformed = errors.New("vsr: malformed message")
 
+// AppendMessage appends the binary encoding of m to dst.
 func AppendMessage(dst []byte, m Message) []byte {
 	e := encoder(dst)
 	e.u8(byte(m.Type()))
@@ -112,6 +114,7 @@ func AppendMessage(dst []byte, m Message) []byte {
 	return e
 }
 
+// DecodeMessage decodes a message encoded by AppendMessage.
 func DecodeMessage(b []byte) (Message, error) {
 	d := decoder{b: b}
 	var m Message

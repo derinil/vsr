@@ -7,6 +7,7 @@ import (
 	"slices"
 )
 
+// ErrInvalidOptions is returned by NewReplica for invalid Options.
 var ErrInvalidOptions = errors.New("vsr: invalid options")
 
 const (
@@ -17,19 +18,32 @@ const (
 	seedSalt               = 0x9e3779b97f4a7c15
 )
 
+// Options configures a Replica. Zero tick counts select defaults.
 type Options struct {
-	Addr            string
-	Config          []string
-	Service         Service
-	Outbox          Outbox
-	Epoch           uint64
-	OldConfig       []string
-	Recovering      bool
-	Join            bool
-	Seed            int64
-	HeartbeatTicks  int
+	// Addr is this replica's address in Config.
+	Addr string
+	// Config lists replica addresses in canonical order.
+	Config []string
+	// Service executes committed ops.
+	Service Service
+	// Outbox sends outbound messages.
+	Outbox Outbox
+	// Epoch, when non-zero, restarts the replica in a later epoch.
+	Epoch uint64
+	// OldConfig is the previous epoch's configuration.
+	OldConfig []string
+	// Recovering starts the replica with the recovery protocol.
+	Recovering bool
+	// Join starts a new replica that waits for a StartEpoch.
+	Join bool
+	// Seed seeds timeout jitter and recovery nonces.
+	Seed int64
+	// HeartbeatTicks is the primary's heartbeat interval in ticks.
+	HeartbeatTicks int
+	// ViewChangeTicks is the backup timeout in ticks, jittered up to 2x.
 	ViewChangeTicks int
-	ResendTicks     int
+	// ResendTicks is the retransmission interval in ticks.
+	ResendTicks int
 }
 
 type clientRecord struct {
@@ -37,6 +51,7 @@ type clientRecord struct {
 	result []byte
 }
 
+// Replica is a VR replica. It is not safe for concurrent use.
 type Replica struct {
 	addr      string
 	config    []string
@@ -81,6 +96,7 @@ type Replica struct {
 	resendAt int
 }
 
+// NewReplica validates o and returns a Replica.
 func NewReplica(o Options) (*Replica, error) {
 	index, err := validateOptions(o)
 	if err != nil {
@@ -168,15 +184,34 @@ func orDefault(v, d int) int {
 	return v
 }
 
-func (r *Replica) Status() Status         { return r.status }
-func (r *Replica) View() uint64           { return r.view }
-func (r *Replica) OpNum() uint64          { return uint64(len(r.log)) }
-func (r *Replica) CommitNum() uint64      { return r.commitNum }
-func (r *Replica) Epoch() uint64          { return r.epoch }
-func (r *Replica) Config() []string       { return slices.Clone(r.config) }
-func (r *Replica) OldConfig() []string    { return slices.Clone(r.oldConfig) }
-func (r *Replica) Index() int             { return r.index }
-func (r *Replica) IsPrimary() bool        { return r.status == StatusNormal && r.isLeader() }
+// Status returns the replica's status.
+func (r *Replica) Status() Status { return r.status }
+
+// View returns the current view number.
+func (r *Replica) View() uint64 { return r.view }
+
+// OpNum returns the number of log entries.
+func (r *Replica) OpNum() uint64 { return uint64(len(r.log)) }
+
+// CommitNum returns the number of committed entries.
+func (r *Replica) CommitNum() uint64 { return r.commitNum }
+
+// Epoch returns the current epoch.
+func (r *Replica) Epoch() uint64 { return r.epoch }
+
+// Config returns a copy of the current configuration.
+func (r *Replica) Config() []string { return slices.Clone(r.config) }
+
+// OldConfig returns a copy of the previous configuration.
+func (r *Replica) OldConfig() []string { return slices.Clone(r.oldConfig) }
+
+// Index returns this replica's position in Config, or -1.
+func (r *Replica) Index() int { return r.index }
+
+// IsPrimary reports whether the replica is the active primary.
+func (r *Replica) IsPrimary() bool { return r.status == StatusNormal && r.isLeader() }
+
+// Log returns the replica's log; callers must not modify it.
 func (r *Replica) Log() []Entry           { return slices.Clip(r.log) }
 func (r *Replica) isLeader() bool         { return r.primaryOf(r.view) == r.index }
 func (r *Replica) primaryOf(v uint64) int { return int(v % uint64(len(r.config))) }
@@ -185,6 +220,7 @@ func (r *Replica) validReplica(i int) bool {
 	return i >= 0 && i < len(r.config) && i != r.index
 }
 
+// Step processes one inbound message.
 func (r *Replica) Step(m Message) {
 	if !r.admit(m) {
 		return
@@ -223,6 +259,7 @@ func (r *Replica) Step(m Message) {
 	}
 }
 
+// Tick advances the logical clock, driving heartbeats, resends and timeouts.
 func (r *Replica) Tick() {
 	r.now++
 	if r.now >= r.resendAt {

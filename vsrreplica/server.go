@@ -1,3 +1,5 @@
+// Package vsrreplica runs a vsr.Replica over a network transport with a
+// real clock and optional epoch persistence.
 package vsrreplica
 
 import (
@@ -14,6 +16,7 @@ import (
 )
 
 const (
+	// DefaultPort is the default listen port.
 	DefaultPort = 10188
 
 	defaultTick              = 10 * time.Millisecond
@@ -26,23 +29,39 @@ const (
 
 var errAlreadyRunning = errors.New("vsrreplica: already running")
 
+// Options configures a Server. Zero values select defaults.
 type Options struct {
-	Addr              string
-	Listen            string
-	Config            []string
-	Service           vsr.Service
-	NewTransport      func(h vsr.Handler) vsr.Transport
-	DataDir           string
-	Recovering        bool
-	Join              bool
-	Tick              time.Duration
-	Heartbeat         time.Duration
+	// Addr is this replica's address in Config.
+	Addr string
+	// Listen is the listen address.
+	Listen string
+	// Config lists replica addresses in canonical order.
+	Config []string
+	// Service is the replicated state machine.
+	Service vsr.Service
+	// NewTransport creates the transport; defaults to vsrtcp.
+	NewTransport func(h vsr.Handler) vsr.Transport
+	// DataDir persists the epoch and configuration; empty disables it.
+	DataDir string
+	// Recovering starts with the recovery protocol.
+	Recovering bool
+	// Join starts as a new replica added by reconfiguration.
+	Join bool
+	// Tick is the logical clock period.
+	Tick time.Duration
+	// Heartbeat is the primary's heartbeat interval.
+	Heartbeat time.Duration
+	// ViewChangeTimeout is how long backups wait for the primary.
 	ViewChangeTimeout time.Duration
-	Resend            time.Duration
-	InboxSize         int
-	Logger            *slog.Logger
+	// Resend is the retransmission interval.
+	Resend time.Duration
+	// InboxSize bounds queued inbound messages; excess is dropped.
+	InboxSize int
+	// Logger receives state transition logs; defaults to slog.Default.
+	Logger *slog.Logger
 }
 
+// State is a snapshot of a replica's protocol state.
 type State struct {
 	Status    vsr.Status
 	Epoch     uint64
@@ -52,6 +71,7 @@ type State struct {
 	Primary   bool
 }
 
+// Server hosts a single replica.
 type Server struct {
 	opts       Options
 	log        *slog.Logger
@@ -64,6 +84,7 @@ type Server struct {
 	savedEpoch uint64
 }
 
+// New creates a Server, restoring persisted state, and starts listening.
 func New(o Options) (*Server, error) {
 	o = o.withDefaults()
 	var st diskState
@@ -157,6 +178,7 @@ func ticks(tick, d time.Duration) int {
 	return max(int((d+tick-1)/tick), 1)
 }
 
+// Run drives the replica until ctx is done or persistence fails.
 func (s *Server) Run(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
@@ -181,6 +203,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+// State returns the latest replica state. It is safe for concurrent use.
 func (s *Server) State() State {
 	return *s.state.Load()
 }

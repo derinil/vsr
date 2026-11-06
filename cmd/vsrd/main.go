@@ -1,3 +1,4 @@
+// Command vsrd runs a VR replica serving kvservice over TCP.
 package main
 
 import (

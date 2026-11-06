@@ -1,3 +1,4 @@
+// Package vsrtcp is a TCP vsr.Transport using length-prefixed frames.
 package vsrtcp
 
 import (
@@ -31,11 +32,17 @@ var (
 	errFrameTooLarge = errors.New("vsrtcp: frame too large")
 )
 
+// Options configures a Transport. Zero values select defaults.
 type Options struct {
-	DialTimeout  time.Duration
-	QueueSize    int
+	// DialTimeout bounds each dial.
+	DialTimeout time.Duration
+	// QueueSize bounds queued outbound frames per peer; excess is dropped.
+	QueueSize int
+	// MaxFrameSize bounds inbound frame size.
 	MaxFrameSize int
-	Backoff      time.Duration
+	// Backoff is the delay before redialing a peer.
+	Backoff time.Duration
+	// WriteTimeout bounds each write.
 	WriteTimeout time.Duration
 }
 
@@ -58,6 +65,7 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// Transport sends messages best-effort, dropping them when queues are full.
 type Transport struct {
 	h    vsr.Handler
 	opts Options
@@ -90,6 +98,7 @@ func (c *conn) close() {
 	})
 }
 
+// New returns a Transport that delivers inbound messages to h.
 func New(h vsr.Handler, o Options) *Transport {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Transport{
@@ -103,6 +112,7 @@ func New(h vsr.Handler, o Options) *Transport {
 	}
 }
 
+// Listen accepts inbound connections on addr.
 func (t *Transport) Listen(addr string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -123,6 +133,7 @@ func (t *Transport) Listen(addr string) error {
 	return nil
 }
 
+// Addr returns the listen address, or nil if not listening.
 func (t *Transport) Addr() net.Addr {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -132,6 +143,7 @@ func (t *Transport) Addr() net.Addr {
 	return t.ln.Addr()
 }
 
+// Send queues m for the replica at to, dialing it if needed.
 func (t *Transport) Send(to string, m vsr.Message) {
 	b := t.frame(m)
 	if b == nil {
@@ -151,6 +163,7 @@ func (t *Transport) Send(to string, m vsr.Message) {
 	enqueue(out, b)
 }
 
+// Reply sends m to a client over the connection it last sent from.
 func (t *Transport) Reply(client uint64, m vsr.Message) {
 	b := t.frame(m)
 	if b == nil {
@@ -166,6 +179,7 @@ func (t *Transport) Reply(client uint64, m vsr.Message) {
 	}
 }
 
+// Close closes all connections and waits for goroutines to exit.
 func (t *Transport) Close() error {
 	t.mu.Lock()
 	if t.closed {
