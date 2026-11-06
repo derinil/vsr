@@ -198,7 +198,7 @@ func BenchmarkExecute(b *testing.B) {
 	read := []byte(`{"k":"read","key":"key-1"}`)
 	cas := []byte(`{"k":"cas","key":"key-1","from":42,"to":43}`)
 	b.ReportAllocs()
-	for range b.N {
+	for b.Loop() {
 		s.Execute(write)
 		s.Execute(read)
 		s.Execute(cas)
