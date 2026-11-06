@@ -3,6 +3,7 @@ package vsrtcp_test
 import (
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"reflect"
 	"runtime"
@@ -235,6 +236,52 @@ func TestSendToUnreachableDoesNotBlock(t *testing.T) {
 	case <-time.After(timeout):
 		t.Fatal("Close blocked")
 	}
+}
+
+func TestStalledPeerDoesNotWedgeWriter(t *testing.T) {
+	const writeTimeout = 100 * time.Millisecond
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	client := newTransport(t, func(vsr.Message) {}, vsrtcp.Options{WriteTimeout: writeTimeout, QueueSize: 4, Backoff: 10 * time.Millisecond})
+
+	op := make([]byte, 1<<20)
+	for i := range 256 {
+		client.Send(addr, vsr.Request{Epoch: 1, ClientID: 1, RequestNum: uint64(i), Op: op})
+	}
+
+	ln.SetDeadline(time.Now().Add(timeout))
+	stuck, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * writeTimeout)
+	stuck.SetReadDeadline(time.Now().Add(timeout))
+	if _, err := io.Copy(io.Discard, stuck); err != nil {
+		t.Fatalf("stalled connection not closed by write deadline: %v", err)
+	}
+	stuck.Close()
+	ln.Close()
+
+	h, ch := inbox(256)
+	srv := newTransport(t, h, vsrtcp.Options{})
+	if err := srv.Listen(addr); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		client.Send(addr, vsr.Commit{CommitNum: 1})
+		select {
+		case m := <-ch:
+			if _, ok := m.(vsr.Commit); ok {
+				return
+			}
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Fatal("message not delivered after peer recovered")
 }
 
 func TestInboundFrames(t *testing.T) {

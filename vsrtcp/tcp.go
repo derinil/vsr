@@ -20,6 +20,7 @@ const (
 	defaultQueueSize    = 4096
 	defaultMaxFrameSize = 64 << 20
 	defaultBackoff      = 100 * time.Millisecond
+	defaultWriteTimeout = 5 * time.Second
 	frameHeaderSize     = 4
 	ioBufferSize        = 64 << 10
 )
@@ -35,6 +36,7 @@ type Options struct {
 	QueueSize    int
 	MaxFrameSize int
 	Backoff      time.Duration
+	WriteTimeout time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -49,6 +51,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Backoff <= 0 {
 		o.Backoff = defaultBackoff
+	}
+	if o.WriteTimeout <= 0 {
+		o.WriteTimeout = defaultWriteTimeout
 	}
 	return o
 }
@@ -328,6 +333,7 @@ func (t *Transport) writeLoop(c *conn) {
 	for {
 		select {
 		case b := <-c.out:
+			c.nc.SetWriteDeadline(time.Now().Add(t.opts.WriteTimeout))
 			if _, err := w.Write(b); err != nil {
 				return
 			}
