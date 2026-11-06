@@ -113,6 +113,8 @@ func NewReplica(o Options) (*Replica, error) {
 	switch {
 	case o.Join:
 		r.status = StatusTransitioning
+	case index < 0:
+		r.status = StatusShutdown
 	case o.Recovering:
 		r.status = StatusRecovering
 		r.nonce = r.rng.Uint64()
@@ -131,8 +133,6 @@ func validateOptions(o Options) (int, error) {
 		return 0, fmt.Errorf("%w: nil outbox", ErrInvalidOptions)
 	case o.HeartbeatTicks < 0 || o.ViewChangeTicks < 0 || o.ResendTicks < 0:
 		return 0, fmt.Errorf("%w: negative tick count", ErrInvalidOptions)
-	case o.Epoch > 0 && !o.Recovering && !o.Join:
-		return 0, fmt.Errorf("%w: epoch %d requires recovering or join", ErrInvalidOptions, o.Epoch)
 	case o.Join && o.Recovering:
 		return 0, fmt.Errorf("%w: join and recovering are exclusive", ErrInvalidOptions)
 	}
@@ -150,8 +150,13 @@ func validateOptions(o Options) (int, error) {
 		return 0, fmt.Errorf("%w: empty config", ErrInvalidOptions)
 	}
 	index := slices.Index(o.Config, o.Addr)
-	if index < 0 {
+	switch {
+	case index < 0 && o.Epoch > 0:
+		return -1, nil
+	case index < 0:
 		return 0, fmt.Errorf("%w: address %q not in config", ErrInvalidOptions, o.Addr)
+	case o.Epoch > 0 && !o.Recovering:
+		return 0, fmt.Errorf("%w: epoch %d requires recovering or join", ErrInvalidOptions, o.Epoch)
 	}
 	return index, nil
 }

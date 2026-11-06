@@ -17,6 +17,7 @@ func TestNewReplicaValidation(t *testing.T) {
 	}{
 		{"empty config", Options{Addr: "a", Service: svc, Outbox: out}},
 		{"address not in config", Options{Addr: "x", Config: config, Service: svc, Outbox: out}},
+		{"epoch without recovering or join", Options{Addr: "a", Config: config, Epoch: 1, Service: svc, Outbox: out}},
 		{"duplicate address", Options{Addr: "a", Config: []string{"a", "b", "a"}, Service: svc, Outbox: out}},
 		{"nil service", Options{Addr: "a", Config: config, Outbox: out}},
 		{"nil outbox", Options{Addr: "a", Config: config, Service: svc}},

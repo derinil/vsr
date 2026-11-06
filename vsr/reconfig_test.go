@@ -1,6 +1,8 @@
 package vsr
 
 import (
+	"fmt"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -362,5 +364,45 @@ func TestRequestsDuringReconfigDroppedThenRetried(t *testing.T) {
 	c.check()
 	if !c.agree(next) {
 		t.Fatalf("history %v", c.ops())
+	}
+}
+
+type outboxLog struct {
+	sent    []Message
+	replies []Message
+}
+
+func (o *outboxLog) Send(_ string, m Message)  { o.sent = append(o.sent, m) }
+func (o *outboxLog) Reply(_ uint64, m Message) { o.replies = append(o.replies, m) }
+
+func TestRemovedReplicaStartsShutDown(t *testing.T) {
+	config := []string{"n0", "n1", "n2"}
+	old := []string{"r0", "r1", "r2"}
+	for _, recovering := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovering=%v", recovering), func(t *testing.T) {
+			out := &outboxLog{}
+			r, err := NewReplica(Options{Addr: "r0", Config: config, OldConfig: old, Epoch: 1, Recovering: recovering, Service: &recorder{}, Outbox: out})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Status() != StatusShutdown || r.Epoch() != 1 || r.Index() != -1 || !slices.Equal(r.Config(), config) || !slices.Equal(r.OldConfig(), old) {
+				t.Fatalf("unexpected initial state: status=%v epoch=%d index=%d config=%v old=%v", r.Status(), r.Epoch(), r.Index(), r.Config(), r.OldConfig())
+			}
+			r.Step(Request{Epoch: 0, ClientID: 5, RequestNum: 1, Op: []byte("op")})
+			r.Step(CheckEpoch{Epoch: 0, ClientID: 5, RequestNum: 2})
+			want := NewEpoch{Epoch: 1, View: 0, Config: config}
+			if !reflect.DeepEqual(out.replies, []Message{want, want}) {
+				t.Fatalf("replies = %#v, want two %#v", out.replies, want)
+			}
+			r.Step(Request{Epoch: 1, ClientID: 5, RequestNum: 3, Op: []byte("op")})
+			r.Step(Prepare{Epoch: 1, OpNum: 1, Entry: Entry{ClientID: 5, RequestNum: 3}})
+			r.Step(Commit{Epoch: 1, CommitNum: 1})
+			for range 100 {
+				r.Tick()
+			}
+			if len(out.replies) != 2 || len(out.sent) != 0 || r.OpNum() != 0 || r.Status() != StatusShutdown {
+				t.Fatalf("shut-down replica acted: replies=%d sent=%d op=%d status=%v", len(out.replies), len(out.sent), r.OpNum(), r.Status())
+			}
+		})
 	}
 }

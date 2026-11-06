@@ -604,6 +604,50 @@ func TestReconfigurePersistsAndRecovers(t *testing.T) {
 	readAll(t, newCl, "b", 5)
 }
 
+func TestRestartedReplacedReplicaRedirectsClients(t *testing.T) {
+	addrs := freeAddrs(t, 6)
+	old, next := addrs[:3], addrs[3:]
+	c := newCluster(t, addrs)
+	for i := range 3 {
+		c.add(i, old, false)
+	}
+	for i := 3; i < 6; i++ {
+		c.add(i, next, true)
+	}
+	for i := range 6 {
+		c.run(i)
+	}
+
+	writeAll(t, c.client(old), "a", 5)
+	reconfigure(t, c.client(old), next)
+	eventually(t, "replaced replicas to shut down", func() bool {
+		for _, addr := range old {
+			if c.node(addr).srv.State().Status != vsr.StatusShutdown {
+				return false
+			}
+		}
+		return true
+	})
+	eventually(t, "new configuration to converge", func() bool { return c.converged(next) })
+
+	for i := range 3 {
+		c.stop(i)
+	}
+	restarted := c.create(0)
+	if s := restarted.State(); s.Status != vsr.StatusShutdown || s.Epoch != 1 {
+		t.Fatalf("state before Run = %+v, want shutdown in epoch 1", s)
+	}
+	c.run(0)
+
+	stale := c.client(old)
+	readAll(t, stale, "a", 5)
+	if !slices.Equal(stale.Config(), next) || stale.Epoch() != 1 {
+		t.Fatalf("stale client at epoch %d config %v, want epoch 1 config %v", stale.Epoch(), stale.Config(), next)
+	}
+	writeAll(t, stale, "b", 5)
+	readAll(t, c.client(next), "b", 5)
+}
+
 func TestJoinerRestartBeforeJoining(t *testing.T) {
 	addrs := freeAddrs(t, 4)
 	old, next := addrs[:3], addrs

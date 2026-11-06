@@ -89,7 +89,7 @@ func New(o Options) (*Server, error) {
 	if found {
 		ro.Config, ro.Epoch, ro.OldConfig = st.Config, st.Epoch, st.OldConfig
 		ro.Recovering = slices.Contains(st.Config, o.Addr)
-		ro.Join = !ro.Recovering
+		ro.Join = false
 	}
 
 	s := &Server{

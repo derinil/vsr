@@ -106,7 +106,7 @@ func (c *Client) Reconfigure(ctx context.Context, config []string) error {
 	defer c.release()
 
 	cfg := slices.Clone(config)
-	next := c.Epoch() + 1
+	start := c.Epoch()
 	if _, err := c.roundTrip(ctx, func(epoch, n uint64) vsr.Message {
 		return vsr.Reconfiguration{Epoch: epoch, ClientID: c.id, RequestNum: n, Config: cfg}
 	}); err != nil {
@@ -114,7 +114,9 @@ func (c *Client) Reconfigure(ctx context.Context, config []string) error {
 	}
 
 	c.mu.Lock()
-	c.config, c.epoch, c.view = cfg, next, 0
+	if c.epoch == start {
+		c.config, c.epoch, c.view = cfg, start+1, 0
+	}
 	c.mu.Unlock()
 
 	_, err := c.roundTrip(ctx, func(epoch, n uint64) vsr.Message {

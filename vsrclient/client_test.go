@@ -384,6 +384,24 @@ func TestReconfigure(t *testing.T) {
 	}
 }
 
+func TestReconfigureKeepsNewerEpoch(t *testing.T) {
+	newer := []string{"x0", "x1", "x2"}
+	adopted := false
+	c, _ := newClient(t, func(f *fakeNet, to string, m vsr.Message) {
+		if _, ok := m.(vsr.Reconfiguration); ok && !adopted {
+			adopted = true
+			f.deliver(vsr.NewEpoch{Epoch: 2, View: 3, Config: newer})
+		}
+		answerAll(f, to, m)
+	}, testConfig)
+	if err := c.Reconfigure(context.Background(), newConfig); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.Config(), newer) || c.Epoch() != 2 || c.View() != 3 {
+		t.Fatalf("config %v epoch %d view %d, want %v 2 3", c.Config(), c.Epoch(), c.View(), newer)
+	}
+}
+
 func TestReconfigureValidation(t *testing.T) {
 	tests := []struct {
 		name   string
