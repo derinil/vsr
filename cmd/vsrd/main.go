@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,6 +37,7 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 	config := fs.String("config", getenv("VSR_CONFIG"), "comma separated replica addresses in canonical order (env VSR_CONFIG)")
 	data := fs.String("data", getenv("VSR_DATA"), "directory for state.json, empty disables persistence (env VSR_DATA)")
 	recovering := fs.Bool("recover", false, "start with the recovery protocol")
+	join := fs.Bool("join", envBool(getenv, "VSR_JOIN"), "start as a replica joining the cluster through a reconfiguration (env VSR_JOIN)")
 	tick := fs.Duration("tick", 10*time.Millisecond, "logical clock tick")
 	heartbeat := fs.Duration("heartbeat", 100*time.Millisecond, "primary heartbeat interval")
 	viewChange := fs.Duration("view-change-timeout", 500*time.Millisecond, "backup timeout on primary silence, jittered up to 2x")
@@ -56,6 +58,7 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 		Service:           kvservice.New(),
 		DataDir:           *data,
 		Recovering:        *recovering,
+		Join:              *join,
 		Tick:              *tick,
 		Heartbeat:         *heartbeat,
 		ViewChangeTimeout: *viewChange,
@@ -78,6 +81,11 @@ func envOr(getenv func(string) string, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envBool(getenv func(string) string, key string) bool {
+	v, _ := strconv.ParseBool(getenv(key))
+	return v
 }
 
 func splitList(s string) []string {

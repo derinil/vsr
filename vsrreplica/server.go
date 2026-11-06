@@ -34,6 +34,7 @@ type Options struct {
 	NewTransport      func(h vsr.Handler) vsr.Transport
 	DataDir           string
 	Recovering        bool
+	Join              bool
 	Tick              time.Duration
 	Heartbeat         time.Duration
 	ViewChangeTimeout time.Duration
@@ -52,14 +53,15 @@ type State struct {
 }
 
 type Server struct {
-	opts      Options
-	log       *slog.Logger
-	inbox     chan vsr.Message
-	transport vsr.Transport
-	replica   *vsr.Replica
-	running   atomic.Bool
-	state     atomic.Pointer[State]
-	last      State
+	opts       Options
+	log        *slog.Logger
+	inbox      chan vsr.Message
+	transport  vsr.Transport
+	replica    *vsr.Replica
+	running    atomic.Bool
+	state      atomic.Pointer[State]
+	last       State
+	savedEpoch uint64
 }
 
 func New(o Options) (*Server, error) {
@@ -72,30 +74,36 @@ func New(o Options) (*Server, error) {
 			return nil, err
 		}
 	}
-	if !found {
-		st = diskState{Config: o.Config}
+
+	ro := vsr.Options{
+		Addr:            o.Addr,
+		Config:          o.Config,
+		Service:         o.Service,
+		Recovering:      o.Recovering,
+		Join:            o.Join,
+		Seed:            time.Now().UnixNano(),
+		HeartbeatTicks:  ticks(o.Tick, o.Heartbeat),
+		ViewChangeTicks: ticks(o.Tick, o.ViewChangeTimeout),
+		ResendTicks:     ticks(o.Tick, o.Resend),
+	}
+	if found {
+		ro.Config, ro.Epoch, ro.OldConfig = st.Config, st.Epoch, st.OldConfig
+		ro.Recovering = slices.Contains(st.Config, o.Addr)
+		ro.Join = !ro.Recovering
 	}
 
 	s := &Server{
-		opts:  o,
-		log:   o.Logger.With("addr", o.Addr),
-		inbox: make(chan vsr.Message, o.InboxSize),
+		opts:       o,
+		log:        o.Logger.With("addr", o.Addr),
+		inbox:      make(chan vsr.Message, o.InboxSize),
+		savedEpoch: st.Epoch,
 	}
 	if found && len(o.Config) > 0 && !slices.Equal(st.Config, o.Config) {
 		s.log.Warn("config option differs from persisted config, using persisted config", "data", o.DataDir)
 	}
 	s.transport = o.NewTransport(s.deliver)
-	r, err := vsr.NewReplica(vsr.Options{
-		Addr:            o.Addr,
-		Config:          st.Config,
-		Service:         o.Service,
-		Outbox:          s.transport,
-		Recovering:      found || o.Recovering,
-		Seed:            time.Now().UnixNano(),
-		HeartbeatTicks:  ticks(o.Tick, o.Heartbeat),
-		ViewChangeTicks: ticks(o.Tick, o.ViewChangeTimeout),
-		ResendTicks:     ticks(o.Tick, o.Resend),
-	})
+	ro.Outbox = s.transport
+	r, err := vsr.NewReplica(ro)
 	if err != nil {
 		s.transport.Close()
 		return nil, err
@@ -105,8 +113,8 @@ func New(o Options) (*Server, error) {
 		s.transport.Close()
 		return nil, err
 	}
-	if o.DataDir != "" && !found {
-		if err := saveState(o.DataDir, st); err != nil {
+	if o.DataDir != "" && !found && !o.Join {
+		if err := s.persist(); err != nil {
 			s.transport.Close()
 			return nil, err
 		}
@@ -166,7 +174,10 @@ func (s *Server) Run(ctx context.Context) error {
 		case <-ticker.C:
 			s.replica.Tick()
 		}
-		s.observe()
+		if err := s.observe(); err != nil {
+			s.transport.Close()
+			return err
+		}
 	}
 }
 
@@ -205,14 +216,29 @@ func (s *Server) snapshot() State {
 	}
 }
 
-func (s *Server) observe() {
+func (s *Server) persist() error {
+	st := diskState{Epoch: s.replica.Epoch(), Config: s.replica.Config(), OldConfig: s.replica.OldConfig()}
+	if err := saveState(s.opts.DataDir, st); err != nil {
+		return err
+	}
+	s.savedEpoch = st.Epoch
+	return nil
+}
+
+func (s *Server) observe() error {
 	cur := s.snapshot()
+	if s.opts.DataDir != "" && cur.Epoch != s.savedEpoch {
+		if err := s.persist(); err != nil {
+			return err
+		}
+	}
 	if cur == s.last {
-		return
+		return nil
 	}
 	s.logTransition(s.last, cur)
 	s.last = cur
 	s.state.Store(&cur)
+	return nil
 }
 
 func (s *Server) logTransition(prev, cur State) {
@@ -221,6 +247,8 @@ func (s *Server) logTransition(prev, cur State) {
 		s.log.Info("epoch changed", attrs...)
 	}
 	switch {
+	case cur.Status == vsr.StatusShutdown && prev.Status != vsr.StatusShutdown:
+		s.log.Info("replica shut down; replaced by reconfiguration", attrs...)
 	case prev.Status == vsr.StatusRecovering && cur.Status == vsr.StatusNormal:
 		s.log.Info("recovered", attrs...)
 	case cur.Status == vsr.StatusViewChange && prev.Status != vsr.StatusViewChange:
