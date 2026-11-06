@@ -39,7 +39,7 @@ var samples = []protocol.Message{
 	protocol.EpochStarted{Epoch: 2, Replica: 0},
 }
 
-func newTransport(t *testing.T, h protocol.Handler, o vsrtcp.Options) *vsrtcp.Transport {
+func newTransport(t *testing.T, h vsrtcp.Handler, o vsrtcp.Options) *vsrtcp.Transport {
 	t.Helper()
 	tr := vsrtcp.New(h, o)
 	t.Cleanup(func() { tr.Close() })
@@ -54,10 +54,20 @@ func listen(t *testing.T, tr *vsrtcp.Transport) string {
 	return tr.Addr().String()
 }
 
-func inbox(n int) (protocol.Handler, chan protocol.Message) {
+func inbox(n int) (vsrtcp.Handler, chan protocol.Message) {
 	ch := make(chan protocol.Message, n)
-	return func(m protocol.Message) { ch <- m }, ch
+	return func(b []byte) error {
+		m, err := protocol.DecodeMessage(b)
+		if err == nil {
+			ch <- m
+		}
+		return err
+	}, ch
 }
+
+func discard([]byte) error { return nil }
+
+func enc(m protocol.Message) []byte { return protocol.AppendMessage(nil, m) }
 
 func next(t *testing.T, ch <-chan protocol.Message) protocol.Message {
 	t.Helper()
@@ -94,7 +104,7 @@ func frame(payload []byte) []byte {
 }
 
 func TestListen(t *testing.T) {
-	tr := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{})
+	tr := newTransport(t, discard, vsrtcp.Options{})
 	if tr.Addr() != nil {
 		t.Fatal("Addr before Listen should be nil")
 	}
@@ -120,11 +130,11 @@ func TestSendDeliversEveryMessageType(t *testing.T) {
 
 	h, ch := inbox(len(samples))
 	addr := listen(t, newTransport(t, h, vsrtcp.Options{}))
-	sender := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{})
+	sender := newTransport(t, discard, vsrtcp.Options{})
 
 	for _, m := range samples {
 		t.Run(m.Type().String(), func(t *testing.T) {
-			sender.Send(addr, m)
+			sender.Send(addr, enc(m))
 			if got := next(t, ch); !reflect.DeepEqual(got, m) {
 				t.Fatalf("got %#v, want %#v", got, m)
 			}
@@ -141,7 +151,7 @@ func TestReplyRoutesToClient(t *testing.T) {
 	client := newTransport(t, replies, vsrtcp.Options{})
 
 	req := protocol.Request{Epoch: 1, ClientID: 42, RequestNum: 1, Op: []byte("get k")}
-	client.Send(addr, req)
+	client.Send(addr, enc(req))
 	if got := next(t, reqCh); !reflect.DeepEqual(got, req) {
 		t.Fatalf("got %#v, want %#v", got, req)
 	}
@@ -149,12 +159,12 @@ func TestReplyRoutesToClient(t *testing.T) {
 	rep := protocol.Reply{Epoch: 1, ClientID: 42, RequestNum: 1, Result: []byte("v")}
 
 	t.Run("unknown client dropped", func(t *testing.T) {
-		srv.Reply(43, rep)
+		srv.Reply(43, enc(rep))
 		expectNone(t, replyCh)
 	})
 
 	t.Run("known client receives", func(t *testing.T) {
-		srv.Reply(42, rep)
+		srv.Reply(42, enc(rep))
 		if got := next(t, replyCh); !reflect.DeepEqual(got, rep) {
 			t.Fatalf("got %#v, want %#v", got, rep)
 		}
@@ -165,10 +175,10 @@ func TestOrderedDelivery(t *testing.T) {
 	const n = 10_000
 	h, ch := inbox(n)
 	addr := listen(t, newTransport(t, h, vsrtcp.Options{}))
-	sender := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{QueueSize: n})
+	sender := newTransport(t, discard, vsrtcp.Options{QueueSize: n})
 
 	for i := range n {
-		sender.Send(addr, protocol.PrepareOK{OpNum: uint64(i), Replica: 1})
+		sender.Send(addr, enc(protocol.PrepareOK{OpNum: uint64(i), Replica: 1}))
 	}
 	for i := range n {
 		m, ok := next(t, ch).(protocol.PrepareOK)
@@ -183,8 +193,8 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	srv1 := newTransport(t, h1, vsrtcp.Options{})
 	addr := listen(t, srv1)
 
-	client := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{Backoff: 10 * time.Millisecond})
-	client.Send(addr, protocol.Commit{View: 1, CommitNum: 0})
+	client := newTransport(t, discard, vsrtcp.Options{Backoff: 10 * time.Millisecond})
+	client.Send(addr, enc(protocol.Commit{View: 1, CommitNum: 0}))
 	next(t, ch1)
 
 	srv1.Close()
@@ -197,7 +207,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 
 	deadline := time.Now().Add(timeout)
 	for i := uint64(1); time.Now().Before(deadline); i++ {
-		client.Send(addr, protocol.Commit{View: 1, CommitNum: i})
+		client.Send(addr, enc(protocol.Commit{View: 1, CommitNum: i}))
 		select {
 		case m := <-ch2:
 			if _, ok := m.(protocol.Commit); !ok {
@@ -212,13 +222,13 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 
 func TestSendToUnreachableDoesNotBlock(t *testing.T) {
 	addr := unusedAddr(t)
-	tr := vsrtcp.New(func(protocol.Message) {}, vsrtcp.Options{DialTimeout: 100 * time.Millisecond})
+	tr := vsrtcp.New(discard, vsrtcp.Options{DialTimeout: 100 * time.Millisecond})
 
 	sent := make(chan struct{})
 	go func() {
 		defer close(sent)
 		for i := range 10_000 {
-			tr.Send(addr, protocol.Commit{CommitNum: uint64(i)})
+			tr.Send(addr, enc(protocol.Commit{CommitNum: uint64(i)}))
 		}
 	}()
 	select {
@@ -246,11 +256,11 @@ func TestStalledPeerDoesNotWedgeWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	client := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{WriteTimeout: writeTimeout, QueueSize: 4, Backoff: 10 * time.Millisecond})
+	client := newTransport(t, discard, vsrtcp.Options{WriteTimeout: writeTimeout, QueueSize: 4, Backoff: 10 * time.Millisecond})
 
 	op := make([]byte, 1<<20)
 	for i := range 256 {
-		client.Send(addr, protocol.Request{Epoch: 1, ClientID: 1, RequestNum: uint64(i), Op: op})
+		client.Send(addr, enc(protocol.Request{Epoch: 1, ClientID: 1, RequestNum: uint64(i), Op: op}))
 	}
 
 	ln.SetDeadline(time.Now().Add(timeout))
@@ -273,7 +283,7 @@ func TestStalledPeerDoesNotWedgeWriter(t *testing.T) {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		client.Send(addr, protocol.Commit{CommitNum: 1})
+		client.Send(addr, enc(protocol.Commit{CommitNum: 1}))
 		select {
 		case m := <-ch:
 			if _, ok := m.(protocol.Commit); ok {
@@ -339,9 +349,9 @@ func dial(t *testing.T, addr string) net.Conn {
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
-	tr := vsrtcp.New(func(protocol.Message) {}, vsrtcp.Options{})
+	tr := vsrtcp.New(discard, vsrtcp.Options{})
 	addr := listen(t, tr)
-	tr.Send(addr, protocol.Commit{})
+	tr.Send(addr, enc(protocol.Commit{}))
 
 	if err := tr.Close(); err != nil {
 		t.Fatal(err)
@@ -349,8 +359,8 @@ func TestCloseIsIdempotent(t *testing.T) {
 	if err := tr.Close(); err != nil {
 		t.Fatal(err)
 	}
-	tr.Send(addr, protocol.Commit{})
-	tr.Reply(1, protocol.Reply{})
+	tr.Send(addr, enc(protocol.Commit{}))
+	tr.Reply(1, enc(protocol.Reply{}))
 	if err := tr.Listen("127.0.0.1:0"); err == nil {
 		t.Fatal("Listen after Close should fail")
 	}
@@ -372,7 +382,7 @@ func waitPeer(t *testing.T, tr *vsrtcp.Transport, done func(vsrstatus.Peer) bool
 }
 
 func TestPeersEmpty(t *testing.T) {
-	tr := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{})
+	tr := newTransport(t, discard, vsrtcp.Options{})
 	if ps := tr.Peers(); ps == nil || len(ps) != 0 {
 		t.Fatalf("Peers() = %#v, want empty non-nil slice", ps)
 	}
@@ -398,9 +408,9 @@ func TestPeersStats(t *testing.T) {
 				h, _ := inbox(tt.sends)
 				addr = listen(t, newTransport(t, h, vsrtcp.Options{}))
 			}
-			sender := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{QueueSize: tt.queueSize, Backoff: 10 * time.Millisecond})
+			sender := newTransport(t, discard, vsrtcp.Options{QueueSize: tt.queueSize, Backoff: 10 * time.Millisecond})
 			for i := range tt.sends {
-				sender.Send(addr, protocol.Commit{CommitNum: uint64(i)})
+				sender.Send(addr, enc(protocol.Commit{CommitNum: uint64(i)}))
 			}
 
 			p := waitPeer(t, sender, func(p vsrstatus.Peer) bool {
@@ -415,10 +425,10 @@ func TestPeersStats(t *testing.T) {
 }
 
 func TestPeersSortedByAddr(t *testing.T) {
-	sender := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{})
+	sender := newTransport(t, discard, vsrtcp.Options{})
 	addrs := []string{unusedAddr(t), unusedAddr(t), unusedAddr(t)}
 	for _, a := range addrs {
-		sender.Send(a, protocol.Commit{})
+		sender.Send(a, enc(protocol.Commit{}))
 	}
 	want := slices.Clone(addrs)
 	slices.Sort(want)
@@ -437,8 +447,8 @@ func TestPeersTrackReconnects(t *testing.T) {
 	srv1 := newTransport(t, h1, vsrtcp.Options{})
 	addr := listen(t, srv1)
 
-	client := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{Backoff: 10 * time.Millisecond})
-	client.Send(addr, protocol.Commit{})
+	client := newTransport(t, discard, vsrtcp.Options{Backoff: 10 * time.Millisecond})
+	client.Send(addr, enc(protocol.Commit{}))
 	next(t, ch1)
 	waitPeer(t, client, func(p vsrstatus.Peer) bool { return p.Connected })
 
@@ -448,7 +458,7 @@ func TestPeersTrackReconnects(t *testing.T) {
 		t.Fatalf("Since = %v while disconnected", down.Since)
 	}
 
-	srv2 := newTransport(t, func(protocol.Message) {}, vsrtcp.Options{})
+	srv2 := newTransport(t, discard, vsrtcp.Options{})
 	if err := srv2.Listen(addr); err != nil {
 		t.Fatal(err)
 	}
@@ -462,12 +472,16 @@ func BenchmarkSend(b *testing.B) {
 	const window = 1 << 14
 	var received atomic.Int64
 
-	recv := vsrtcp.New(func(protocol.Message) { received.Add(1) }, vsrtcp.Options{})
+	recv := vsrtcp.New(func(b []byte) error {
+		_, err := protocol.DecodeMessage(b)
+		received.Add(1)
+		return err
+	}, vsrtcp.Options{})
 	b.Cleanup(func() { recv.Close() })
 	if err := recv.Listen("127.0.0.1:0"); err != nil {
 		b.Fatal(err)
 	}
-	send := vsrtcp.New(func(protocol.Message) {}, vsrtcp.Options{QueueSize: 2 * window})
+	send := vsrtcp.New(discard, vsrtcp.Options{QueueSize: 2 * window})
 	b.Cleanup(func() { send.Close() })
 
 	addr := recv.Addr().String()
@@ -479,7 +493,7 @@ func BenchmarkSend(b *testing.B) {
 		for int64(i)-received.Load() >= window {
 			runtime.Gosched()
 		}
-		send.Send(addr, m)
+		send.Send(addr, enc(m))
 	}
 	for received.Load() < int64(b.N) {
 		runtime.Gosched()

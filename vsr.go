@@ -3,10 +3,7 @@
 // the cluster with a Client.
 package vsr
 
-import (
-	"github.com/derinil/vsr/internal/protocol"
-	"github.com/derinil/vsr/internal/vsrtcp"
-)
+import "github.com/derinil/vsr/internal/protocol"
 
 // Service is the deterministic state machine being replicated.
 // Execute applies a committed op and returns its result.
@@ -26,7 +23,3 @@ const (
 	StatusTransitioning = protocol.StatusTransitioning
 	StatusShutdown      = protocol.StatusShutdown
 )
-
-func newTCPTransport(h protocol.Handler) protocol.Transport {
-	return vsrtcp.New(h, vsrtcp.Options{})
-}

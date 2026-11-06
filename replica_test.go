@@ -20,7 +20,6 @@ import (
 
 	"github.com/derinil/vsr/internal/kvservice"
 	"github.com/derinil/vsr/internal/protocol"
-	"github.com/derinil/vsr/internal/vsrtcp"
 )
 
 const (
@@ -153,10 +152,7 @@ func (c *cluster) primary() int {
 
 func (c *cluster) client(config []string) *Client {
 	cl, err := NewClient(ClientOptions{
-		Config: config,
-		newTransport: func(h protocol.Handler) protocol.Transport {
-			return vsrtcp.New(h, vsrtcp.Options{})
-		},
+		Config:         config,
 		RequestTimeout: testRequestTimeout,
 	})
 	if err != nil {

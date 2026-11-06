@@ -1,4 +1,4 @@
-// Package vsrtcp is a TCP protocol.Transport using length-prefixed frames.
+// Package vsrtcp is a TCP transport using length-prefixed frames.
 package vsrtcp
 
 import (
@@ -68,9 +68,12 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// Handler receives an inbound message and returns an error when it is malformed.
+type Handler = func(msg []byte) error
+
 // Transport sends messages best-effort, dropping them when queues are full.
 type Transport struct {
-	h    protocol.Handler
+	h    Handler
 	opts Options
 
 	ctx    context.Context
@@ -84,8 +87,6 @@ type Transport struct {
 	conns  map[*conn]struct{}
 	routes map[uint64]*conn
 }
-
-var _ protocol.Transport = (*Transport)(nil)
 
 type peer struct {
 	addr    string
@@ -144,7 +145,7 @@ func (c *conn) close() {
 }
 
 // New returns a Transport that delivers inbound messages to h.
-func New(h protocol.Handler, o Options) *Transport {
+func New(h Handler, o Options) *Transport {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Transport{
 		h:      h,
@@ -188,10 +189,9 @@ func (t *Transport) Addr() net.Addr {
 	return t.ln.Addr()
 }
 
-// Send queues m for the replica at to, dialing it if needed.
-func (t *Transport) Send(to string, m protocol.Message) {
-	b := t.frame(m)
-	if b == nil {
+// Send queues msg for the replica at to, dialing it if needed.
+func (t *Transport) Send(to string, msg []byte) {
+	if len(msg) > t.opts.MaxFrameSize {
 		return
 	}
 	t.mu.Lock()
@@ -205,7 +205,7 @@ func (t *Transport) Send(to string, m protocol.Message) {
 		t.peers[to] = p
 		t.wg.Go(func() { t.runPeer(p) })
 	}
-	if !enqueue(p.out, b) {
+	if !enqueue(p.out, msg) {
 		p.dropped.Add(1)
 	}
 }
@@ -222,10 +222,9 @@ func (t *Transport) Peers() []vsrstatus.Peer {
 	return out
 }
 
-// Reply sends m to a client over the connection it last sent from.
-func (t *Transport) Reply(client uint64, m protocol.Message) {
-	b := t.frame(m)
-	if b == nil {
+// Reply sends msg to a client over the connection it last sent from.
+func (t *Transport) Reply(client uint64, msg []byte) {
+	if len(msg) > t.opts.MaxFrameSize {
 		return
 	}
 	t.mu.Lock()
@@ -234,7 +233,7 @@ func (t *Transport) Reply(client uint64, m protocol.Message) {
 		return
 	}
 	if c := t.routes[client]; c != nil {
-		enqueue(c.out, b)
+		enqueue(c.out, msg)
 	}
 }
 
@@ -260,16 +259,6 @@ func (t *Transport) Close() error {
 	}
 	t.wg.Wait()
 	return err
-}
-
-func (t *Transport) frame(m protocol.Message) []byte {
-	b := protocol.AppendMessage(make([]byte, frameHeaderSize, 64), m)
-	n := len(b) - frameHeaderSize
-	if n > t.opts.MaxFrameSize {
-		return nil
-	}
-	binary.BigEndian.PutUint32(b, uint32(n))
-	return b
 }
 
 func enqueue(out chan<- []byte, b []byte) bool {
@@ -376,22 +365,18 @@ func (t *Transport) readLoop(c *conn, inbound bool) {
 			return
 		}
 		buf = frame
-		m, err := protocol.DecodeMessage(frame)
-		if err != nil {
+		if inbound {
+			if id, ok := protocol.PeekClient(frame); ok {
+				t.route(id, c)
+			}
+		}
+		if t.h(frame) != nil {
 			return
 		}
-		if inbound {
-			t.route(m, c)
-		}
-		t.h(m)
 	}
 }
 
-func (t *Transport) route(m protocol.Message, c *conn) {
-	id, ok := protocol.ClientOf(m)
-	if !ok {
-		return
-	}
+func (t *Transport) route(id uint64, c *conn) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, live := t.conns[c]; live {
@@ -405,7 +390,7 @@ func (t *Transport) writeLoop(c *conn) {
 		select {
 		case b := <-c.out:
 			c.nc.SetWriteDeadline(time.Now().Add(t.opts.WriteTimeout))
-			if _, err := w.Write(b); err != nil {
+			if err := writeFrame(w, b); err != nil {
 				return
 			}
 		case <-c.quit:
@@ -413,7 +398,7 @@ func (t *Transport) writeLoop(c *conn) {
 		}
 		written := 1
 		for pending := len(c.out); pending > 0; pending-- {
-			if _, err := w.Write(<-c.out); err != nil {
+			if err := writeFrame(w, <-c.out); err != nil {
 				return
 			}
 			written++
@@ -425,6 +410,16 @@ func (t *Transport) writeLoop(c *conn) {
 			c.peer.sent.Add(uint64(written))
 		}
 	}
+}
+
+func writeFrame(w *bufio.Writer, msg []byte) error {
+	var hdr [frameHeaderSize]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(msg)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(msg)
+	return err
 }
 
 func readFrame(r io.Reader, buf []byte, maxSize int) ([]byte, error) {

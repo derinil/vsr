@@ -196,6 +196,26 @@ func TestClientOf(t *testing.T) {
 	}
 }
 
+func TestPeekClient(t *testing.T) {
+	for _, m := range samples() {
+		t.Run(m.Type().String(), func(t *testing.T) {
+			wantID, wantOK := protocol.ClientOf(m)
+			if id, ok := protocol.PeekClient(protocol.AppendMessage(nil, m)); id != wantID || ok != wantOK {
+				t.Fatalf("PeekClient = (%d, %t), want (%d, %t)", id, ok, wantID, wantOK)
+			}
+		})
+	}
+	big := protocol.Request{Epoch: 1 << 40, ClientID: 1<<63 + 5}
+	if id, ok := protocol.PeekClient(protocol.AppendMessage(nil, big)); !ok || id != big.ClientID {
+		t.Fatalf("PeekClient = (%d, %t), want (%d, true)", id, ok, big.ClientID)
+	}
+	for _, b := range [][]byte{nil, {byte(protocol.MsgRequest)}, {byte(protocol.MsgRequest), 1}, {byte(protocol.MsgRequest), 0x80}} {
+		if _, ok := protocol.PeekClient(b); ok {
+			t.Errorf("PeekClient(%v) ok, want not ok", b)
+		}
+	}
+}
+
 func TestMsgTypeString(t *testing.T) {
 	tests := []struct {
 		t    protocol.MsgType

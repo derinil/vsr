@@ -30,13 +30,17 @@ type responder func(f *fakeNet, to string, m protocol.Message)
 
 type fakeNet struct {
 	mu      sync.Mutex
-	handler protocol.Handler
+	handler Handler
 	respond responder
 	sent    []delivery
 	closes  int
 }
 
-func (f *fakeNet) Send(to string, m protocol.Message) {
+func (f *fakeNet) Send(to string, b []byte) {
+	m, err := protocol.DecodeMessage(b)
+	if err != nil {
+		panic(err)
+	}
 	f.mu.Lock()
 	f.sent = append(f.sent, delivery{to, m})
 	f.mu.Unlock()
@@ -45,7 +49,7 @@ func (f *fakeNet) Send(to string, m protocol.Message) {
 	}
 }
 
-func (f *fakeNet) Reply(uint64, protocol.Message) {}
+func (f *fakeNet) Reply(uint64, []byte) {}
 
 func (f *fakeNet) Listen(string) error { return nil }
 
@@ -56,7 +60,7 @@ func (f *fakeNet) Close() error {
 	return nil
 }
 
-func (f *fakeNet) deliver(m protocol.Message) { f.handler(m) }
+func (f *fakeNet) deliver(m protocol.Message) { f.handler(encode(m)) }
 
 func (f *fakeNet) messages() []delivery {
 	f.mu.Lock()
@@ -70,14 +74,14 @@ func (f *fakeNet) closeCount() int {
 	return f.closes
 }
 
-func noopTransport(protocol.Handler) protocol.Transport { return &fakeNet{} }
+func noopTransport(Handler) Transport { return &fakeNet{} }
 
 func newClient(t *testing.T, respond responder, config []string) (*Client, *fakeNet) {
 	t.Helper()
 	var fake *fakeNet
 	c, err := NewClient(ClientOptions{
 		Config: config,
-		newTransport: func(h protocol.Handler) protocol.Transport {
+		NewTransport: func(h Handler) Transport {
 			fake = &fakeNet{handler: h, respond: respond}
 			return fake
 		},
@@ -139,8 +143,8 @@ func TestNewClient(t *testing.T) {
 		name string
 		opts ClientOptions
 	}{
-		{"empty config", ClientOptions{newTransport: noopTransport}},
-		{"duplicate address", ClientOptions{Config: []string{"r0", "r1", "r0"}, newTransport: noopTransport}},
+		{"empty config", ClientOptions{NewTransport: noopTransport}},
+		{"duplicate address", ClientOptions{Config: []string{"r0", "r1", "r0"}, NewTransport: noopTransport}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,11 +157,11 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestRandomClientID(t *testing.T) {
-	a, err := NewClient(ClientOptions{Config: testConfig, newTransport: noopTransport})
+	a, err := NewClient(ClientOptions{Config: testConfig, NewTransport: noopTransport})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewClient(ClientOptions{Config: testConfig, newTransport: noopTransport})
+	b, err := NewClient(ClientOptions{Config: testConfig, NewTransport: noopTransport})
 	if err != nil {
 		t.Fatal(err)
 	}

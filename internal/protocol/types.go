@@ -67,13 +67,3 @@ type Outbox interface {
 	Send(to string, m Message)
 	Reply(client uint64, m Message)
 }
-
-// Handler receives inbound messages from a Transport.
-type Handler func(m Message)
-
-// Transport is a network Outbox that can listen for inbound messages.
-type Transport interface {
-	Outbox
-	Listen(addr string) error
-	Close() error
-}

@@ -26,8 +26,8 @@ type ClientOptions struct {
 	ClientID uint64
 	// RequestTimeout is how long to wait before retrying with all replicas.
 	RequestTimeout time.Duration
-
-	newTransport func(h protocol.Handler) protocol.Transport
+	// NewTransport creates the client's transport; defaults to TCP.
+	NewTransport func(h Handler) Transport
 }
 
 // Client sends requests to a cluster one at a time, following view and
@@ -35,7 +35,7 @@ type ClientOptions struct {
 type Client struct {
 	id        uint64
 	timeout   time.Duration
-	transport protocol.Transport
+	transport Transport
 
 	sem       chan struct{}
 	reply     chan protocol.Reply
@@ -61,8 +61,8 @@ func NewClient(o ClientOptions) (*Client, error) {
 	if err := checkConfig(o.Config); err != nil {
 		return nil, err
 	}
-	if o.newTransport == nil {
-		o.newTransport = newTCPTransport
+	if o.NewTransport == nil {
+		o.NewTransport = newTCPTransport
 	}
 	id := o.ClientID
 	if id == 0 {
@@ -84,7 +84,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
-	c.transport = o.newTransport(c.handle)
+	c.transport = o.NewTransport(handler(c.handle))
 	return c, nil
 }
 
@@ -237,12 +237,13 @@ func (c *Client) transmit(build buildFunc, n uint64, all bool) {
 	primary := config[c.view%uint64(len(config))]
 	c.mu.Unlock()
 
+	b := encode(m)
 	if !all {
-		c.transport.Send(primary, m)
+		c.transport.Send(primary, b)
 		return
 	}
 	for _, addr := range config {
-		c.transport.Send(addr, m)
+		c.transport.Send(addr, b)
 	}
 }
 

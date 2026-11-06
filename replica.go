@@ -63,8 +63,8 @@ type ReplicaOptions struct {
 	InboxSize int
 	// Logger receives state transition logs; defaults to slog.Default.
 	Logger *slog.Logger
-
-	newTransport func(h protocol.Handler) protocol.Transport
+	// NewTransport creates the transport; defaults to TCP.
+	NewTransport func(h Handler) Transport
 }
 
 // State is a snapshot of a replica's protocol state.
@@ -84,7 +84,7 @@ type Replica struct {
 	log          *slog.Logger
 	started      time.Time
 	inbox        chan protocol.Message
-	transport    protocol.Transport
+	transport    Transport
 	peers        peerLister
 	replica      *protocol.Replica
 	running      atomic.Bool
@@ -149,9 +149,9 @@ func NewReplica(o ReplicaOptions) (*Replica, error) {
 			s.checkpointed = c.OpNum
 		}
 	}
-	s.transport = o.newTransport(s.deliver)
+	s.transport = o.NewTransport(handler(s.deliver))
 	s.peers, _ = s.transport.(peerLister)
-	ro.Outbox = s.transport
+	ro.Outbox = outbox{s.transport}
 	r, err := protocol.NewReplica(ro)
 	if err != nil {
 		s.transport.Close()
@@ -178,8 +178,8 @@ func (o ReplicaOptions) withDefaults() ReplicaOptions {
 	if o.Listen == "" {
 		o.Listen = fmt.Sprintf(":%d", DefaultPort)
 	}
-	if o.newTransport == nil {
-		o.newTransport = newTCPTransport
+	if o.NewTransport == nil {
+		o.NewTransport = newTCPTransport
 	}
 	o.Tick = orDefault(o.Tick, defaultTick)
 	o.Heartbeat = orDefault(o.Heartbeat, defaultHeartbeat)

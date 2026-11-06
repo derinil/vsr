@@ -437,3 +437,22 @@ func (d *decoder) byteSlices() [][]byte {
 	}
 	return vs
 }
+
+// PeekClient returns the sender's client ID if b encodes a client message,
+// without decoding the rest of b.
+func PeekClient(b []byte) (uint64, bool) {
+	if len(b) == 0 {
+		return 0, false
+	}
+	switch MsgType(b[0]) {
+	case MsgRequest, MsgReconfiguration, MsgCheckEpoch:
+	default:
+		return 0, false
+	}
+	_, n := binary.Uvarint(b[1:])
+	if n <= 0 {
+		return 0, false
+	}
+	id, m := binary.Uvarint(b[1+n:])
+	return id, m > 0
+}

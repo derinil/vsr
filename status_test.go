@@ -18,10 +18,10 @@ import (
 
 type nopTransport struct{}
 
-func (nopTransport) Send(string, protocol.Message)  {}
-func (nopTransport) Reply(uint64, protocol.Message) {}
-func (nopTransport) Listen(string) error            { return nil }
-func (nopTransport) Close() error                   { return nil }
+func (nopTransport) Send(string, []byte)  {}
+func (nopTransport) Reply(uint64, []byte) {}
+func (nopTransport) Listen(string) error  { return nil }
+func (nopTransport) Close() error         { return nil }
 
 type peersTransport struct {
 	nopTransport
@@ -30,13 +30,13 @@ type peersTransport struct {
 
 func (t peersTransport) Peers() []vsrstatus.Peer { return t.peers }
 
-func newStub(t *testing.T, tr protocol.Transport, o ReplicaOptions) (*Replica, protocol.Handler) {
+func newStub(t *testing.T, tr Transport, o ReplicaOptions) (*Replica, Handler) {
 	t.Helper()
-	var deliver protocol.Handler
+	var deliver Handler
 	o.Addr, o.Listen, o.Config = "127.0.0.1:1", "127.0.0.1:1", []string{"127.0.0.1:1"}
 	o.Service = kvservice.New()
 	o.Logger = slog.New(slog.DiscardHandler)
-	o.newTransport = func(h protocol.Handler) protocol.Transport {
+	o.NewTransport = func(h Handler) Transport {
 		deliver = h
 		return tr
 	}
@@ -105,7 +105,7 @@ func TestStatusCounters(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s, deliver := newStub(t, nopTransport{}, ReplicaOptions{InboxSize: tt.inboxSize})
 			for i := range tt.delivered {
-				deliver(protocol.Commit{CommitNum: uint64(i)})
+				deliver(encode(protocol.Commit{CommitNum: uint64(i)}))
 			}
 			st := s.status()
 			if st.Received != tt.wantReceived || st.InboxDropped != tt.wantDropped {
@@ -118,7 +118,7 @@ func TestStatusCounters(t *testing.T) {
 func TestStatusPeers(t *testing.T) {
 	tests := []struct {
 		name string
-		tr   protocol.Transport
+		tr   Transport
 		want []vsrstatus.Peer
 	}{
 		{"transport without peers", nopTransport{}, []vsrstatus.Peer{}},
