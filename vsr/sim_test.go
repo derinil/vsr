@@ -3,6 +3,7 @@ package vsr
 import (
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,20 +27,30 @@ type execution struct {
 	result string
 }
 
+type snapshot struct {
+	epoch  uint64
+	config []string
+	old    []string
+}
+
 type cluster struct {
 	t            *testing.T
 	seed         int64
+	epoch        uint64
 	config       []string
+	addrs        []string
 	addrIndex    map[string]int
 	rng          *rand.Rand
 	replicas     []*Replica
 	services     []*recorder
 	incarnations []int
+	saved        []snapshot
 	queue        []envelope
 	group        []int
 	dropRate     float64
 	filter       func(envelope) bool
 	clients      []*simClient
+	control      map[string]bool
 	history      []execution
 	position     map[string]int
 	replies      []Reply
@@ -61,13 +72,26 @@ func (s *recorder) Execute(op []byte) []byte {
 	return []byte(result)
 }
 
+type requestKind uint8
+
+const (
+	kindRequest requestKind = iota
+	kindReconfig
+	kindCheck
+)
+
 type simClient struct {
-	id        uint64
-	remaining int
-	issued    uint64
-	pending   bool
-	waited    int
-	completed int
+	id          uint64
+	epoch       uint64
+	config      []string
+	remaining   int
+	issued      uint64
+	pending     bool
+	kind        requestKind
+	target      []string
+	targetEpoch uint64
+	waited      int
+	completed   int
 }
 
 type simOutbox struct {
@@ -76,7 +100,12 @@ type simOutbox struct {
 }
 
 func (o simOutbox) Send(to string, m Message) {
-	o.c.enqueue(envelope{from: o.from, to: o.c.addrIndex[to], msg: m})
+	i, ok := o.c.addrIndex[to]
+	if !ok {
+		o.c.fail("send to unknown address %q", to)
+		return
+	}
+	o.c.enqueue(envelope{from: o.from, to: i, msg: m})
 }
 
 func (o simOutbox) Reply(client uint64, m Message) {
@@ -90,37 +119,54 @@ func opKey(client, req uint64) string {
 func newCluster(t *testing.T, n int, seed int64) *cluster {
 	t.Helper()
 	c := &cluster{
-		t:            t,
-		seed:         seed,
-		config:       make([]string, n),
-		addrIndex:    make(map[string]int, n),
-		rng:          rand.New(rand.NewPCG(uint64(seed), 0xc0ffee)),
-		replicas:     make([]*Replica, n),
-		services:     make([]*recorder, n),
-		incarnations: make([]int, n),
-		position:     make(map[string]int),
+		t:         t,
+		seed:      seed,
+		config:    make([]string, n),
+		addrIndex: make(map[string]int, n),
+		rng:       rand.New(rand.NewPCG(uint64(seed), 0xc0ffee)),
+		control:   make(map[string]bool),
+		position:  make(map[string]int),
 	}
 	for i := range n {
 		c.config[i] = fmt.Sprintf("r%d", i)
-		c.addrIndex[c.config[i]] = i
+	}
+	for _, addr := range c.config {
+		c.addSlot(addr)
 	}
 	for i := range n {
-		c.start(i, false)
+		c.start(i, Options{Config: c.config})
 	}
 	return c
 }
 
-func (c *cluster) start(i int, recovering bool) {
+func (c *cluster) addSlot(addr string) int {
+	i := len(c.addrs)
+	c.addrs = append(c.addrs, addr)
+	c.addrIndex[addr] = i
+	c.replicas = append(c.replicas, nil)
+	c.services = append(c.services, nil)
+	c.incarnations = append(c.incarnations, 0)
+	c.saved = append(c.saved, snapshot{})
+	if c.group != nil {
+		c.group = append(c.group, 0)
+	}
+	return i
+}
+
+func (c *cluster) spawn(addr string) int {
+	i := c.addSlot(addr)
+	c.start(i, Options{Join: true})
+	return i
+}
+
+func (c *cluster) start(i int, o Options) {
 	c.incarnations[i]++
 	svc := &recorder{c: c, replica: i}
-	r, err := NewReplica(Options{
-		Addr:       c.config[i],
-		Config:     c.config,
-		Service:    svc,
-		Outbox:     simOutbox{c: c, from: i},
-		Recovering: recovering,
-		Seed:       c.seed*1000 + int64(i)*100 + int64(c.incarnations[i]),
-	})
+	o.Addr = c.addrs[i]
+	o.Service = svc
+	o.Outbox = simOutbox{c: c, from: i}
+	o.Seed = c.seed*1000 + int64(i)*100 + int64(c.incarnations[i])
+	r, err := NewReplica(o)
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -129,15 +175,25 @@ func (c *cluster) start(i int, recovering bool) {
 }
 
 func (c *cluster) crash(i int) {
+	r := c.replicas[i]
+	c.saved[i] = snapshot{epoch: r.Epoch(), config: r.Config(), old: r.OldConfig()}
 	c.replicas[i] = nil
 }
 
 func (c *cluster) restart(i int) {
-	c.start(i, true)
+	if c.replicas[i] != nil {
+		c.crash(i)
+	}
+	s := c.saved[i]
+	if len(s.config) == 0 {
+		c.start(i, Options{Join: true})
+		return
+	}
+	c.start(i, Options{Config: s.config, OldConfig: s.old, Epoch: s.epoch, Recovering: true})
 }
 
 func (c *cluster) isolate(i int) {
-	g := make([]int, len(c.config))
+	g := make([]int, len(c.addrs))
 	g[i] = 1
 	c.group = g
 }
@@ -147,7 +203,12 @@ func (c *cluster) heal() {
 }
 
 func (c *cluster) addClient(remaining int) *simClient {
-	cl := &simClient{id: uint64(len(c.clients) + 1), remaining: remaining}
+	cl := &simClient{
+		id:        uint64(len(c.clients) + 1),
+		epoch:     c.epoch,
+		config:    slices.Clone(c.config),
+		remaining: remaining,
+	}
 	c.clients = append(c.clients, cl)
 	return cl
 }
@@ -224,17 +285,30 @@ func (c *cluster) deliver(e envelope) {
 }
 
 func (c *cluster) receiveClient(e envelope) {
-	rep, ok := e.msg.(Reply)
-	if !ok {
-		return
+	switch m := e.msg.(type) {
+	case Reply:
+		c.onReply(e.client, m)
+	case NewEpoch:
+		c.onNewEpoch(e.client, m)
 	}
+}
+
+func (c *cluster) client(id uint64) *simClient {
+	if id == 0 || id > uint64(len(c.clients)) {
+		return nil
+	}
+	return c.clients[id-1]
+}
+
+func (c *cluster) onReply(id uint64, rep Reply) {
 	c.replies = append(c.replies, rep)
-	c.observeReply(rep)
-	if e.client == 0 || e.client > uint64(len(c.clients)) {
+	cl := c.client(id)
+	if c.control[opKey(id, rep.RequestNum)] {
+		c.onControlReply(cl, rep)
 		return
 	}
-	cl := c.clients[e.client-1]
-	if !cl.pending || rep.RequestNum != cl.issued {
+	c.observeReply(rep)
+	if cl == nil || !cl.pending || cl.kind != kindRequest || rep.RequestNum != cl.issued {
 		return
 	}
 	cl.pending = false
@@ -244,27 +318,65 @@ func (c *cluster) receiveClient(e envelope) {
 	}
 }
 
-func (c *cluster) requestOf(cl *simClient) Request {
-	return Request{ClientID: cl.id, RequestNum: cl.issued, Op: []byte(opKey(cl.id, cl.issued))}
+func (c *cluster) onControlReply(cl *simClient, rep Reply) {
+	if cl == nil || !cl.pending || rep.RequestNum != cl.issued {
+		return
+	}
+	switch cl.kind {
+	case kindReconfig:
+		cl.epoch, cl.config = cl.targetEpoch, cl.target
+		c.issue(cl, kindCheck)
+	case kindCheck:
+		cl.pending = false
+	}
+}
+
+func (c *cluster) onNewEpoch(id uint64, m NewEpoch) {
+	cl := c.client(id)
+	if cl == nil || m.Epoch <= cl.epoch {
+		return
+	}
+	cl.epoch, cl.config = m.Epoch, m.Config
+	if cl.pending {
+		c.sendCurrent(cl)
+	}
+}
+
+func (c *cluster) message(cl *simClient) Message {
+	switch cl.kind {
+	case kindReconfig:
+		return Reconfiguration{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued, Config: cl.target}
+	case kindCheck:
+		return CheckEpoch{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued}
+	}
+	return Request{Epoch: cl.epoch, ClientID: cl.id, RequestNum: cl.issued, Op: []byte(opKey(cl.id, cl.issued))}
+}
+
+func (c *cluster) sendCurrent(cl *simClient) {
+	msg := c.message(cl)
+	if p := c.leader(); cl.kind == kindRequest && p >= 0 && c.replicas[p].Epoch() == cl.epoch && slices.Contains(cl.config, c.addrs[p]) {
+		c.enqueue(envelope{from: -1, to: p, msg: msg})
+		return
+	}
+	for _, addr := range cl.config {
+		c.enqueue(envelope{from: -1, to: c.addrIndex[addr], msg: msg})
+	}
+}
+
+func (c *cluster) issue(cl *simClient, kind requestKind) {
+	cl.issued++
+	cl.kind = kind
+	cl.pending = true
+	cl.waited = 0
+	if kind != kindRequest {
+		c.control[opKey(cl.id, cl.issued)] = true
+	}
+	c.sendCurrent(cl)
 }
 
 func (c *cluster) startRequest(cl *simClient) {
 	cl.remaining--
-	cl.issued++
-	cl.pending = true
-	cl.waited = 0
-	req := c.requestOf(cl)
-	if p := c.leader(); p >= 0 {
-		c.enqueue(envelope{from: -1, to: p, msg: req})
-		return
-	}
-	c.broadcastRequest(req)
-}
-
-func (c *cluster) broadcastRequest(req Request) {
-	for i := range c.replicas {
-		c.enqueue(envelope{from: -1, to: i, msg: req})
-	}
+	c.issue(cl, kindRequest)
 }
 
 func (c *cluster) submit(cl *simClient) {
@@ -272,6 +384,23 @@ func (c *cluster) submit(cl *simClient) {
 	if !cl.pending {
 		c.startRequest(cl)
 	}
+}
+
+func (c *cluster) reconfigure(cl *simClient, config []string) {
+	for _, addr := range config {
+		i, ok := c.addrIndex[addr]
+		switch {
+		case !ok:
+			c.spawn(addr)
+		case c.replicas[i] != nil && c.replicas[i].Status() == StatusShutdown:
+			c.start(i, Options{Join: true})
+		}
+	}
+	cl.target = slices.Clone(config)
+	cl.targetEpoch = cl.epoch + 1
+	c.epoch = cl.targetEpoch
+	c.config = slices.Clone(config)
+	c.issue(cl, kindReconfig)
 }
 
 func (c *cluster) tickClient(cl *simClient) {
@@ -284,16 +413,18 @@ func (c *cluster) tickClient(cl *simClient) {
 	cl.waited++
 	if cl.waited >= simClientRetry {
 		cl.waited = 0
-		c.broadcastRequest(c.requestOf(cl))
+		c.sendCurrent(cl)
 	}
 }
 
 func (c *cluster) leader() int {
 	best := -1
-	var bestView uint64
 	for i, r := range c.replicas {
-		if r != nil && r.IsPrimary() && (best < 0 || r.View() > bestView) {
-			best, bestView = i, r.View()
+		if r == nil || !r.IsPrimary() {
+			continue
+		}
+		if best < 0 || r.Epoch() > c.replicas[best].Epoch() || r.Epoch() == c.replicas[best].Epoch() && r.View() > c.replicas[best].View() {
+			best = i
 		}
 	}
 	return best
@@ -379,7 +510,7 @@ func (c *cluster) describe() string {
 			fmt.Fprintf(&b, "[r%d down] ", i)
 			continue
 		}
-		fmt.Fprintf(&b, "[r%d %s view=%d op=%d commit=%d] ", i, r.Status(), r.View(), r.OpNum(), r.CommitNum())
+		fmt.Fprintf(&b, "[r%d %s epoch=%d view=%d op=%d commit=%d] ", i, r.Status(), r.Epoch(), r.View(), r.OpNum(), r.CommitNum())
 	}
 	return b.String()
 }

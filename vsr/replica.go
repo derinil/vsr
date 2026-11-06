@@ -22,7 +22,10 @@ type Options struct {
 	Config          []string
 	Service         Service
 	Outbox          Outbox
+	Epoch           uint64
+	OldConfig       []string
 	Recovering      bool
+	Join            bool
 	Seed            int64
 	HeartbeatTicks  int
 	ViewChangeTicks int
@@ -35,18 +38,24 @@ type clientRecord struct {
 }
 
 type Replica struct {
-	config  []string
-	index   int
-	faults  int
-	service Service
-	outbox  Outbox
-	rng     *rand.Rand
+	addr      string
+	config    []string
+	oldConfig []string
+	index     int
+	faults    int
+	joining   bool
+	service   Service
+	outbox    Outbox
+	rng       *rand.Rand
 
 	heartbeatTicks  int
 	viewChangeTicks int
 	resendTicks     int
 
 	epoch          uint64
+	epochStart     uint64
+	catchUp        int
+	started        map[int]bool
 	view           uint64
 	lastNormalView uint64
 	status         Status
@@ -79,16 +88,20 @@ func NewReplica(o Options) (*Replica, error) {
 	}
 	n := len(o.Config)
 	r := &Replica{
+		addr:            o.Addr,
 		config:          slices.Clone(o.Config),
+		oldConfig:       slices.Clone(o.OldConfig),
 		index:           index,
 		faults:          (n - 1) / 2,
+		joining:         o.Join,
+		epoch:           o.Epoch,
 		service:         o.Service,
 		outbox:          o.Outbox,
 		rng:             rand.New(rand.NewPCG(uint64(o.Seed), uint64(o.Seed)^seedSalt)),
 		heartbeatTicks:  orDefault(o.HeartbeatTicks, defaultHeartbeatTicks),
 		viewChangeTicks: orDefault(o.ViewChangeTicks, defaultViewChangeTicks),
 		resendTicks:     orDefault(o.ResendTicks, defaultResendTicks),
-		status:          StatusNormal,
+		started:         make(map[int]bool),
 		clientTable:     make(map[uint64]clientRecord),
 		inflight:        make(map[uint64]uint64),
 		acked:           make([]uint64, n),
@@ -97,10 +110,14 @@ func NewReplica(o Options) (*Replica, error) {
 		dvcs:            make(map[int]DoViewChange),
 		responses:       make(map[int]RecoveryResponse),
 	}
-	if o.Recovering {
+	switch {
+	case o.Join:
+		r.status = StatusTransitioning
+	case o.Recovering:
 		r.status = StatusRecovering
 		r.nonce = r.rng.Uint64()
-	} else {
+	default:
+		r.status = StatusNormal
 		r.resetTimer()
 	}
 	return r, nil
@@ -108,26 +125,31 @@ func NewReplica(o Options) (*Replica, error) {
 
 func validateOptions(o Options) (int, error) {
 	switch {
-	case len(o.Config) == 0:
-		return 0, fmt.Errorf("%w: empty config", ErrInvalidOptions)
 	case o.Service == nil:
 		return 0, fmt.Errorf("%w: nil service", ErrInvalidOptions)
 	case o.Outbox == nil:
 		return 0, fmt.Errorf("%w: nil outbox", ErrInvalidOptions)
 	case o.HeartbeatTicks < 0 || o.ViewChangeTicks < 0 || o.ResendTicks < 0:
 		return 0, fmt.Errorf("%w: negative tick count", ErrInvalidOptions)
+	case o.Epoch > 0 && !o.Recovering && !o.Join:
+		return 0, fmt.Errorf("%w: epoch %d requires recovering or join", ErrInvalidOptions, o.Epoch)
+	case o.Join && o.Recovering:
+		return 0, fmt.Errorf("%w: join and recovering are exclusive", ErrInvalidOptions)
 	}
-	index := -1
 	seen := make(map[string]bool, len(o.Config))
-	for i, addr := range o.Config {
+	for _, addr := range o.Config {
 		if seen[addr] {
 			return 0, fmt.Errorf("%w: duplicate address %q", ErrInvalidOptions, addr)
 		}
 		seen[addr] = true
-		if addr == o.Addr {
-			index = i
-		}
 	}
+	if o.Join {
+		return -1, nil
+	}
+	if len(o.Config) == 0 {
+		return 0, fmt.Errorf("%w: empty config", ErrInvalidOptions)
+	}
+	index := slices.Index(o.Config, o.Addr)
 	if index < 0 {
 		return 0, fmt.Errorf("%w: address %q not in config", ErrInvalidOptions, o.Addr)
 	}
@@ -146,6 +168,8 @@ func (r *Replica) View() uint64           { return r.view }
 func (r *Replica) OpNum() uint64          { return uint64(len(r.log)) }
 func (r *Replica) CommitNum() uint64      { return r.commitNum }
 func (r *Replica) Epoch() uint64          { return r.epoch }
+func (r *Replica) Config() []string       { return slices.Clone(r.config) }
+func (r *Replica) OldConfig() []string    { return slices.Clone(r.oldConfig) }
 func (r *Replica) Index() int             { return r.index }
 func (r *Replica) IsPrimary() bool        { return r.status == StatusNormal && r.isLeader() }
 func (r *Replica) Log() []Entry           { return slices.Clip(r.log) }
@@ -157,61 +181,41 @@ func (r *Replica) validReplica(i int) bool {
 }
 
 func (r *Replica) Step(m Message) {
-	if r.status == StatusRecovering {
-		if rr, ok := m.(RecoveryResponse); ok && rr.Epoch == r.epoch {
-			r.onRecoveryResponse(rr)
-		}
+	if !r.admit(m) {
 		return
 	}
 	switch m := m.(type) {
 	case Request:
-		if r.admitClient(m.Epoch, m.ClientID) {
-			r.onRequest(m)
-		}
+		r.onRequest(m)
+	case Reconfiguration:
+		r.onReconfiguration(m)
+	case CheckEpoch:
+		r.onCheckEpoch(m)
+	case RecoveryResponse:
+		r.onRecoveryResponse(m)
 	case Prepare:
-		if m.Epoch == r.epoch {
-			r.onPrepare(m)
-		}
+		r.onPrepare(m)
 	case PrepareOK:
-		if m.Epoch == r.epoch {
-			r.onPrepareOK(m)
-		}
+		r.onPrepareOK(m)
 	case Commit:
-		if m.Epoch == r.epoch {
-			r.onCommit(m)
-		}
+		r.onCommit(m)
 	case StartViewChange:
-		if m.Epoch == r.epoch {
-			r.onStartViewChange(m)
-		}
+		r.onStartViewChange(m)
 	case DoViewChange:
-		if m.Epoch == r.epoch {
-			r.onDoViewChange(m)
-		}
+		r.onDoViewChange(m)
 	case StartView:
-		if m.Epoch == r.epoch {
-			r.onStartView(m)
-		}
+		r.onStartView(m)
 	case Recovery:
-		if m.Epoch == r.epoch {
-			r.onRecovery(m)
-		}
+		r.onRecovery(m)
 	case GetState:
-		if m.Epoch == r.epoch {
-			r.onGetState(m)
-		}
+		r.onGetState(m)
 	case NewState:
-		if m.Epoch == r.epoch {
-			r.onNewState(m)
-		}
+		r.onNewState(m)
+	case StartEpoch:
+		r.onStartEpoch(m)
+	case EpochStarted:
+		r.onEpochStarted(m)
 	}
-}
-
-func (r *Replica) admitClient(epoch, client uint64) bool {
-	if epoch < r.epoch {
-		r.outbox.Reply(client, NewEpoch{Epoch: r.epoch, View: r.view, Config: r.config})
-	}
-	return epoch == r.epoch
 }
 
 func (r *Replica) Tick() {
@@ -242,6 +246,9 @@ func (r *Replica) resend() {
 		}
 	case StatusNormal:
 		r.resendGetState()
+		r.announceStart()
+	case StatusTransitioning:
+		r.resendTransition()
 	}
 }
 

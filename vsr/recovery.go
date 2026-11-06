@@ -33,6 +33,7 @@ func (r *Replica) onRecoveryResponse(m RecoveryResponse) {
 		return
 	}
 	r.log = slices.Clone(p.Log)
+	r.epochStart = epochStartIn(r.log, r.config)
 	r.enterNormal(latest)
 	clear(r.responses)
 	r.commitUpTo(p.CommitNum)

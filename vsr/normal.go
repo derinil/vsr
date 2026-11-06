@@ -3,27 +3,7 @@ package vsr
 import "slices"
 
 func (r *Replica) onRequest(m Request) {
-	if !r.IsPrimary() {
-		return
-	}
-	if n := len(r.log); n > 0 && r.log[n-1].Kind == EntryReconfig {
-		return
-	}
-	if rec, ok := r.clientTable[m.ClientID]; ok && m.RequestNum <= rec.req {
-		if m.RequestNum == rec.req {
-			r.reply(m.ClientID, rec.req, rec.result)
-		}
-		return
-	}
-	if s, ok := r.inflight[m.ClientID]; ok && m.RequestNum <= s {
-		return
-	}
-	r.appendEntry(Entry{Kind: EntryOp, ClientID: m.ClientID, RequestNum: m.RequestNum, Op: m.Op})
-	r.broadcast(r.prepareMsg(r.OpNum()))
-	r.resetTimer()
-	if r.faults == 0 {
-		r.commitUpTo(r.OpNum())
-	}
+	r.propose(m.ClientID, m.RequestNum, Entry{Kind: EntryOp, ClientID: m.ClientID, RequestNum: m.RequestNum, Op: m.Op})
 }
 
 func (r *Replica) prepareMsg(n uint64) Prepare {
@@ -102,6 +82,10 @@ func (r *Replica) commitUpTo(k uint64) {
 		r.clientTable[e.ClientID] = clientRecord{req: e.RequestNum, result: result}
 		if s, ok := r.inflight[e.ClientID]; ok && s == e.RequestNum {
 			delete(r.inflight, e.ClientID)
+		}
+		if e.Kind == EntryReconfig && r.commitNum > r.epochStart {
+			r.switchEpoch(e)
+			return
 		}
 		if r.IsPrimary() {
 			r.reply(e.ClientID, e.RequestNum, result)

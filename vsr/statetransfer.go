@@ -30,6 +30,16 @@ func (r *Replica) resendGetState() {
 }
 
 func (r *Replica) onGetState(m GetState) {
+	if m.OpNum < r.epochStart && validIndex(m.Replica, len(r.config)) && r.commitNum >= r.epochStart {
+		r.send(m.Replica, NewState{
+			Epoch:     r.epoch,
+			View:      r.view,
+			OpNum:     r.epochStart,
+			CommitNum: r.epochStart,
+			Log:       slices.Clip(r.log[m.OpNum:r.epochStart]),
+		})
+		return
+	}
 	if r.status != StatusNormal || m.View != r.view || !r.validReplica(m.Replica) || m.OpNum >= r.OpNum() {
 		return
 	}
@@ -43,18 +53,33 @@ func (r *Replica) onGetState(m GetState) {
 }
 
 func (r *Replica) onNewState(m NewState) {
-	n := uint64(len(m.Log))
-	if r.status != StatusNormal || m.View != r.view || r.IsPrimary() || n == 0 || n > m.OpNum || m.OpNum <= r.OpNum() {
+	if r.status == StatusTransitioning {
+		if m.OpNum == r.epochStart {
+			r.appendState(m)
+			r.commitUpTo(m.CommitNum)
+			r.tryFinishTransition()
+		}
 		return
 	}
-	first := m.OpNum - n + 1
-	if first > r.OpNum()+1 {
+	if r.status != StatusNormal || m.View != r.view || r.IsPrimary() || !r.appendState(m) {
 		return
-	}
-	for _, e := range m.Log[r.OpNum()+1-first:] {
-		r.appendEntry(e)
 	}
 	r.stateReq = false
 	r.send(r.primaryOf(r.view), PrepareOK{Epoch: r.epoch, View: r.view, OpNum: r.OpNum(), Replica: r.index})
 	r.commitUpTo(m.CommitNum)
+}
+
+func (r *Replica) appendState(m NewState) bool {
+	n := uint64(len(m.Log))
+	if n == 0 || n > m.OpNum || m.OpNum <= r.OpNum() {
+		return false
+	}
+	first := m.OpNum - n + 1
+	if first > r.OpNum()+1 {
+		return false
+	}
+	for _, e := range m.Log[r.OpNum()+1-first:] {
+		r.appendEntry(e)
+	}
+	return true
 }
