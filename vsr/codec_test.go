@@ -34,7 +34,7 @@ func samples() []vsr.Message {
 		vsr.RecoveryResponse{Epoch: 1, View: 9, Nonce: 42, OpNum: 7, CommitNum: 5, Log: entries, HasLog: true, Config: config, OldConfig: config[:2], Replica: 2, LogBase: 3, EpochStart: 5},
 		vsr.GetState{Epoch: 1, View: 9, OpNum: 7, Replica: 1},
 		vsr.NewState{Epoch: 1, View: 9, OpNum: 7, CommitNum: 5, Log: entries[:1], LogBase: 6},
-		vsr.StartEpoch{Epoch: 2, OpNum: 7, OldConfig: config[:2], NewConfig: config[1:], Replica: 1},
+		vsr.StartEpoch{Epoch: 2, OpNum: 7, OldConfig: config[:2], NewConfig: config[1:], From: "b"},
 		vsr.EpochStarted{Epoch: math.MaxUint64, Replica: math.MaxInt},
 		vsr.GetCheckpoint{Epoch: 2, MinOpNum: 100, From: config[0]},
 		vsr.CheckpointInfo{Epoch: 2, OpNum: 100, Size: 1 << 20, PageSize: 4096, Root: bytes.Repeat([]byte{0xAB}, 32), Clients: []byte{1, 2, 3}},

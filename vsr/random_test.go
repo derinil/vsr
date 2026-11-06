@@ -71,6 +71,28 @@ func TestRandomizedCheckpointReconfiguration(t *testing.T) {
 	}
 }
 
+func TestReconfigurationStrandedMember(t *testing.T) {
+	for _, tc := range []struct {
+		seed int64
+		ckpt bool
+	}{
+		{478, true},
+		{553, false},
+		{553, true},
+		{1267, false},
+		{1267, true},
+	} {
+		t.Run(fmt.Sprintf("seed=%d/checkpoints=%t", tc.seed, tc.ckpt), func(t *testing.T) {
+			t.Parallel()
+			var c checkpointing
+			if tc.ckpt {
+				c = randomCheckpointing(tc.seed)
+			}
+			runRandom(t, 3, tc.seed, true, c)
+		})
+	}
+}
+
 func randomCheckpointing(seed int64) checkpointing {
 	return checkpointing{
 		interval: 5 + int(seed%7),

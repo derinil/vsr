@@ -172,14 +172,14 @@ type NewState struct {
 	LogBase                       uint64
 }
 
-// StartEpoch tells new replicas to begin an epoch.
+// StartEpoch tells a replica that the epoch has begun.
 type StartEpoch struct {
 	Epoch, OpNum         uint64
 	OldConfig, NewConfig []string
-	Replica              int
+	From                 string
 }
 
-// EpochStarted tells old replicas a new replica has started the epoch.
+// EpochStarted tells a replica that a new-config replica has started the epoch.
 type EpochStarted struct {
 	Epoch   uint64
 	Replica int

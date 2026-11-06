@@ -110,7 +110,7 @@ func AppendMessage(dst []byte, m Message) []byte {
 		e.u64(m.OpNum)
 		e.strings(m.OldConfig)
 		e.strings(m.NewConfig)
-		e.int(m.Replica)
+		e.str(m.From)
 	case EpochStarted:
 		e.u64(m.Epoch)
 		e.int(m.Replica)
@@ -207,7 +207,7 @@ func DecodeMessage(b []byte) (Message, error) {
 	case MsgNewState:
 		m = NewState{Epoch: d.u64(), View: d.u64(), OpNum: d.u64(), CommitNum: d.u64(), Log: d.entries(), LogBase: d.u64()}
 	case MsgStartEpoch:
-		m = StartEpoch{Epoch: d.u64(), OpNum: d.u64(), OldConfig: d.strings(), NewConfig: d.strings(), Replica: d.int()}
+		m = StartEpoch{Epoch: d.u64(), OpNum: d.u64(), OldConfig: d.strings(), NewConfig: d.strings(), From: d.str()}
 	case MsgEpochStarted:
 		m = EpochStarted{Epoch: d.u64(), Replica: d.int()}
 	case MsgGetCheckpoint:

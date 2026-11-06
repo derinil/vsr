@@ -34,7 +34,7 @@ var samples = []vsr.Message{
 	vsr.RecoveryResponse{Epoch: 1, View: 5, Nonce: 99, OpNum: 9, CommitNum: 8, Log: []vsr.Entry{{Kind: vsr.EntryOp, Op: []byte("y")}}, HasLog: true, Config: []string{"a:1", "b:2"}, OldConfig: []string{"a:1"}, Replica: 0},
 	vsr.GetState{Epoch: 1, View: 5, OpNum: 8, Replica: 1},
 	vsr.NewState{Epoch: 1, View: 5, OpNum: 9, CommitNum: 8, Log: []vsr.Entry{{Kind: vsr.EntryOp, ClientID: 2, RequestNum: 2, Op: []byte("z")}}},
-	vsr.StartEpoch{Epoch: 2, OpNum: 9, OldConfig: []string{"a:1", "b:2"}, NewConfig: []string{"b:2", "c:3"}, Replica: 1},
+	vsr.StartEpoch{Epoch: 2, OpNum: 9, OldConfig: []string{"a:1", "b:2"}, NewConfig: []string{"b:2", "c:3"}, From: "b:2"},
 	vsr.EpochStarted{Epoch: 2, Replica: 0},
 }
 

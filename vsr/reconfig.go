@@ -69,9 +69,9 @@ func (r *Replica) admitStartEpoch(m StartEpoch) bool {
 	case m.Epoch > r.epoch:
 		return true
 	case m.Epoch == r.epoch:
-		return r.status == StatusNormal && validIndex(m.Replica, len(m.OldConfig))
+		return r.status == StatusNormal && m.From != ""
 	case m.Epoch+1 == r.epoch:
-		r.notifyLower(m.OldConfig, m.Replica)
+		r.notifyLower(m.From)
 	}
 	return false
 }
@@ -80,8 +80,8 @@ func (r *Replica) admitPeer(epoch uint64, sender int, cfg []string, open bool) b
 	switch {
 	case epoch == r.epoch:
 		return open
-	case epoch+1 == r.epoch:
-		r.notifyLower(cfg, sender)
+	case epoch+1 == r.epoch && validIndex(sender, len(cfg)):
+		r.notifyLower(cfg[sender])
 	}
 	return false
 }
@@ -91,21 +91,23 @@ func (r *Replica) admitPrimary(epoch, view uint64, open bool) bool {
 	case epoch == r.epoch:
 		return open
 	case epoch+1 == r.epoch && len(r.oldConfig) > 0:
-		r.notifyLower(r.oldConfig, int(view%uint64(len(r.oldConfig))))
+		r.notifyLower(r.oldConfig[view%uint64(len(r.oldConfig))])
 	}
 	return false
 }
 
-func (r *Replica) notifyLower(cfg []string, sender int) {
-	own := slices.Index(r.oldConfig, r.addr)
-	if !r.listening() || own < 0 || !validIndex(sender, len(cfg)) {
-		return
+func (r *Replica) notifyLower(to string) {
+	if r.listening() && r.member() && to != "" && to != r.addr {
+		r.outbox.Send(to, r.startEpoch())
 	}
-	r.outbox.Send(cfg[sender], r.startEpochFrom(own))
 }
 
-func (r *Replica) startEpochFrom(own int) StartEpoch {
-	return StartEpoch{Epoch: r.epoch, OpNum: r.epochStart, OldConfig: r.oldConfig, NewConfig: r.config, Replica: own}
+func (r *Replica) member() bool {
+	return r.index >= 0 || slices.Contains(r.oldConfig, r.addr)
+}
+
+func (r *Replica) startEpoch() StartEpoch {
+	return StartEpoch{Epoch: r.epoch, OpNum: r.epochStart, OldConfig: r.oldConfig, NewConfig: r.config, From: r.addr}
 }
 
 func (r *Replica) propose(client, req uint64, e Entry) {
@@ -173,7 +175,7 @@ func (r *Replica) switchEpoch(e Entry) {
 		r.broadcast(Commit{Epoch: r.epoch, View: r.view, CommitNum: n})
 		for _, addr := range e.Config {
 			if !slices.Contains(old, addr) {
-				r.outbox.Send(addr, StartEpoch{Epoch: r.epoch + 1, OpNum: n, OldConfig: old, NewConfig: e.Config, Replica: r.index})
+				r.outbox.Send(addr, StartEpoch{Epoch: r.epoch + 1, OpNum: n, OldConfig: old, NewConfig: e.Config, From: r.addr})
 			}
 		}
 	}
@@ -220,9 +222,15 @@ func (r *Replica) tryFinishTransition() {
 		return
 	}
 	r.enterNormal(0)
+	m := EpochStarted{Epoch: r.epoch, Replica: r.index}
+	for _, addr := range r.config {
+		if addr != r.addr {
+			r.outbox.Send(addr, m)
+		}
+	}
 	for _, addr := range r.oldConfig {
 		if !slices.Contains(r.config, addr) {
-			r.outbox.Send(addr, EpochStarted{Epoch: r.epoch, Replica: r.index})
+			r.outbox.Send(addr, m)
 		}
 	}
 }
@@ -250,13 +258,12 @@ func (r *Replica) resendTransition() {
 }
 
 func (r *Replica) announceStart() {
-	own := slices.Index(r.oldConfig, r.addr)
-	if own < 0 {
+	if r.epoch == 0 || !r.member() {
 		return
 	}
-	m := r.startEpochFrom(own)
+	m := r.startEpoch()
 	for i, addr := range r.config {
-		if !r.started[i] && (r.index < 0 || !slices.Contains(r.oldConfig, addr)) {
+		if i != r.index && !r.started[i] {
 			r.outbox.Send(addr, m)
 		}
 	}
@@ -264,7 +271,7 @@ func (r *Replica) announceStart() {
 
 func (r *Replica) onStartEpoch(m StartEpoch) {
 	if m.Epoch == r.epoch {
-		r.outbox.Send(m.OldConfig[m.Replica], EpochStarted{Epoch: r.epoch, Replica: r.index})
+		r.outbox.Send(m.From, EpochStarted{Epoch: r.epoch, Replica: r.index})
 		return
 	}
 	if r.status == StatusRecovering {
@@ -288,7 +295,7 @@ func (r *Replica) onEpochStarted(m EpochStarted) {
 		return
 	}
 	switch {
-	case r.status == StatusNormal && r.index >= 0:
+	case r.index >= 0:
 		r.started[m.Replica] = true
 	case r.status == StatusTransitioning && r.index < 0:
 		r.started[m.Replica] = true
