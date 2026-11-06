@@ -29,7 +29,7 @@ const newNodeState = () => ({
   lastSeen: 0,
   last: null,
   rates: { commit: 0, peers: new Map() },
-  hist: { commit: [], log: [] },
+  hist: { commit: [], log: [], cpu: [], mem: [] },
 });
 const EMPTY_NODE_STATE = newNodeState();
 
@@ -66,7 +66,17 @@ const push = (series, value) => {
   if (series.length > HISTORY) series.shift();
 };
 const rateText = (v) => (v >= 10 ? Math.round(v).toLocaleString('en-US') : v.toFixed(1));
-const bytesText = (b) => (b < 1024 ? `${b} B` : `${(b / 1024).toFixed(1)} KiB`);
+function bytesText(b) {
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let i = 0;
+  while (b >= 1024 && i < units.length - 1) {
+    b /= 1024;
+    i++;
+  }
+  return i ? `${b.toFixed(1)} ${units[i]}` : `${b} ${units[0]}`;
+}
+
+const cpuText = (pct) => `${pct.toFixed(0)}%`;
 const msText = (v) => `${(v ?? 0).toFixed(1)} ms`;
 const clockText = (ms) => new Date(ms).toLocaleTimeString('en-GB');
 
@@ -119,6 +129,8 @@ function observe(node, now) {
   ns.lastSeen = now;
   push(ns.hist.commit, node.commitNum);
   push(ns.hist.log, node.logLen);
+  push(ns.hist.cpu, node.process?.cpuPercent ?? 0);
+  push(ns.hist.mem, node.process?.memBytes ?? 0);
 }
 
 function updateRates(ns, node, now) {
@@ -490,6 +502,7 @@ function nodeRows(node) {
     ['op / commit', `${int(node.opNum)} / ${int(node.commitNum)}`],
     ['log', `${int(node.logLen)} from ${int(node.logBase)}`],
     ['checkpoint', `${int(node.checkpointOp)} · ${bytesText(node.checkpointBytes)}`],
+    ...(node.process ? [['cpu / mem', `${cpuText(node.process.cpuPercent)} / ${bytesText(node.process.memBytes)}`]] : []),
   ];
 }
 
@@ -579,6 +592,8 @@ function cardStats(rep, model) {
       stat('Latency', msText(rep.target.latencyMs)),
       stat('Checkpoint', `${int(n.checkpointOp)} · ${bytesText(n.checkpointBytes)}`),
       stat('Uptime', uptimeText(n)),
+      stat('CPU', n.process ? cpuText(n.process.cpuPercent) : '—'),
+      stat('Memory', n.process ? `${bytesText(n.process.memBytes)} · ${int(n.process.goroutines)} gr` : '—'),
       stat('Received', int(n.received)),
       stat('Inbox dropped', int(n.inboxDropped)),
     ),
@@ -609,10 +624,12 @@ function cardSparks(rep) {
     { class: 'sparks' },
     sparkBlock('Commit', rep.ns.hist.commit),
     sparkBlock('Log length', rep.ns.hist.log),
+    sparkBlock('CPU', rep.ns.hist.cpu, cpuText),
+    sparkBlock('Memory', rep.ns.hist.mem, bytesText),
   );
 }
 
-function sparkBlock(label, series) {
+function sparkBlock(label, series, fmt = int) {
   return h(
     'div',
     { class: 'spark-block' },
@@ -620,7 +637,7 @@ function sparkBlock(label, series) {
       'div',
       { class: 'spark-head' },
       h('span', {}, label),
-      h('span', {}, series.length ? int(series.at(-1)) : '—'),
+      h('span', {}, series.length ? fmt(series.at(-1)) : '—'),
     ),
     sparkline(series),
   );

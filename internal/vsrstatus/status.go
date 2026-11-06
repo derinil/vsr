@@ -35,6 +35,15 @@ type Node struct {
 	Started         time.Time `json:"started"`
 	Now             time.Time `json:"now"`
 	Peers           []Peer    `json:"peers"`
+	Process         Process   `json:"process"`
+}
+
+// Process is the resource usage of the process hosting a replica.
+type Process struct {
+	CPUPercent float64 `json:"cpuPercent"`
+	MemBytes   uint64  `json:"memBytes"`
+	HeapBytes  uint64  `json:"heapBytes"`
+	Goroutines int     `json:"goroutines"`
 }
 
 // Target is one polled replica as seen by the monitor.

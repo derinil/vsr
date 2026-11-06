@@ -70,6 +70,7 @@ func (s *Replica) status() vsrstatus.Node {
 		Started:         s.started,
 		Now:             time.Now(),
 		Peers:           peers,
+		Process:         s.process.sample(),
 	}
 }
 

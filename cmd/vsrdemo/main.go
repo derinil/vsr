@@ -1,6 +1,7 @@
-// Command vsrdemo runs a local key-value cluster, spare replicas ready to join
-// it, a client issuing random queries every few seconds, and the monitor
-// dashboard in one process.
+// Command vsrdemo runs a local key-value cluster with one OS process per
+// replica, spare replicas ready to join it, many concurrent clients driving
+// load, a chaos agent injecting crashes, pauses, partitions and lossy links,
+// and the monitor dashboard.
 package main
 
 import (
@@ -9,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"os"
 	"os/signal"
 	"slices"
@@ -18,11 +18,17 @@ import (
 	"time"
 
 	"github.com/derinil/vsr"
-	"github.com/derinil/vsr/internal/kvservice"
 	"github.com/derinil/vsr/internal/vsrmon"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == nodeCommand {
+		if err := runNode(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "vsrdemo node:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	o, err := parseOptions(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vsrdemo:", err)
@@ -38,14 +44,16 @@ func main() {
 }
 
 type options struct {
-	replicas []string
-	spares   []string
-	status   []string
-	listen   string
-	minWait  time.Duration
-	maxWait  time.Duration
-	keys     int
-	timeout  time.Duration
+	replicas   []string
+	spares     []string
+	status     []string
+	listen     string
+	clients    int
+	keys       int
+	timeout    time.Duration
+	chaos      bool
+	chaosEvery time.Duration
+	report     time.Duration
 }
 
 func parseOptions(args []string) (options, error) {
@@ -55,10 +63,12 @@ func parseOptions(args []string) (options, error) {
 	port := fs.Int("port", vsr.DefaultPort, "first replica port; replica i, spares last, listens on port+i")
 	statusPort := fs.Int("status-port", 18080, "first status port; replica i serves GET /status on status-port+i")
 	listen := fs.String("listen", ":9999", "dashboard listen address")
-	minWait := fs.Duration("min-interval", time.Second, "minimum delay between queries")
-	maxWait := fs.Duration("max-interval", 3*time.Second, "maximum delay between queries")
-	keys := fs.Int("keys", 5, "number of distinct keys queried")
+	clients := fs.Int("clients", 64, "number of concurrent clients issuing queries back to back")
+	keys := fs.Int("keys", 1000, "number of distinct shared keys queried")
 	timeout := fs.Duration("timeout", 5*time.Second, "time limit for one query")
+	chaos := fs.Bool("chaos", true, "inject crashes, pauses, partitions and lossy links")
+	chaosEvery := fs.Duration("chaos-interval", 4*time.Second, "mean delay between injected faults")
+	report := fs.Duration("report", 5*time.Second, "interval between load and per-node CPU and memory reports")
 	fs.Parse(args)
 
 	switch {
@@ -66,14 +76,26 @@ func parseOptions(args []string) (options, error) {
 		return options{}, errors.New("-replicas must be positive")
 	case *spares < 0:
 		return options{}, errors.New("-spares must not be negative")
-	case *minWait <= 0 || *maxWait < *minWait:
-		return options{}, errors.New("need 0 < -min-interval <= -max-interval")
+	case *clients < 1:
+		return options{}, errors.New("-clients must be positive")
 	case *keys < 1:
 		return options{}, errors.New("-keys must be positive")
 	case *timeout <= 0:
 		return options{}, errors.New("-timeout must be positive")
+	case *chaosEvery <= 0:
+		return options{}, errors.New("-chaos-interval must be positive")
+	case *report <= 0:
+		return options{}, errors.New("-report must be positive")
 	}
-	o := options{listen: *listen, minWait: *minWait, maxWait: *maxWait, keys: *keys, timeout: *timeout}
+	o := options{
+		listen:     *listen,
+		clients:    *clients,
+		keys:       *keys,
+		timeout:    *timeout,
+		chaos:      *chaos,
+		chaosEvery: *chaosEvery,
+		report:     *report,
+	}
 	for i := range *n + *spares {
 		addr := fmt.Sprintf("127.0.0.1:%d", *port+i)
 		if i < *n {
@@ -87,43 +109,30 @@ func parseOptions(args []string) (options, error) {
 }
 
 func run(ctx context.Context, o options, logger *slog.Logger) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "vsrdemo-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	fail := func(err error) {
-		if err != nil {
-			cancel(err)
-		}
+
+	c := newCluster(exe, dir, o, logger)
+	for _, n := range c.nodes {
+		wg.Go(func() { n.supervise(ctx) })
 	}
 
-	all := slices.Concat(o.replicas, o.spares)
-	urls := make(map[string]string, len(all))
-	for i, addr := range all {
-		r, err := vsr.NewReplica(vsr.ReplicaOptions{
-			Addr:     addr,
-			Listen:   addr,
-			HTTPAddr: o.status[i],
-			Config:   o.replicas,
-			Join:     i >= len(o.replicas),
-			Service:  kvservice.New(),
-			Logger:   logger,
-		})
-		if err != nil {
-			cancel(err)
-			return err
-		}
-		wg.Go(func() { fail(r.Run(ctx)) })
-		urls[addr] = "http://" + o.status[i]
+	urls := make(map[string]string, len(c.nodes))
+	for _, n := range c.nodes {
+		urls[n.addr] = "http://" + n.http
 	}
-
-	cl, err := vsr.NewClient(vsr.ClientOptions{Config: o.replicas})
-	if err != nil {
-		cancel(err)
-		return err
-	}
-	defer cl.Close()
-
 	nodes := make([]string, len(o.replicas))
 	for i, addr := range o.replicas {
 		nodes[i] = urls[addr]
@@ -136,8 +145,20 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 		Timeout:   300 * time.Millisecond,
 		Logger:    logger,
 	})
-	wg.Go(func() { fail(vsrmon.Serve(ctx, mon, o.listen, logger)) })
-	wg.Go(func() { query(ctx, cl, o, logger) })
+	wg.Go(func() {
+		if err := vsrmon.Serve(ctx, mon, o.listen, logger); err != nil {
+			cancel(err)
+		}
+	})
+
+	stats := &loadStats{}
+	for i := range o.clients {
+		wg.Go(func() { worker(ctx, i, slices.Clone(o.replicas), o, stats, logger) })
+	}
+	wg.Go(func() { report(ctx, c, stats, o.report, logger) })
+	if o.chaos {
+		wg.Go(func() { chaos(ctx, c, o.chaosEvery, logger) })
+	}
 
 	<-ctx.Done()
 	if err := context.Cause(ctx); !errors.Is(err, context.Canceled) {
@@ -146,49 +167,13 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 	return nil
 }
 
-func query(ctx context.Context, cl *vsr.Client, o options, logger *slog.Logger) {
-	timer := time.NewTimer(wait(o))
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		op, err := randomOp(o.keys)
-		if err != nil {
-			logger.Error("encode query", "err", err)
-			return
-		}
-		qctx, cancel := context.WithTimeout(ctx, o.timeout)
-		start := time.Now()
-		b, err := cl.Invoke(qctx, op)
-		cancel()
-		latency := time.Since(start).Round(time.Microsecond)
-		switch r, derr := kvservice.DecodeResult(b); {
-		case err != nil:
-			logger.Warn("query failed", "op", string(op), "err", err, "latency", latency)
-		case derr != nil:
-			logger.Warn("query result malformed", "op", string(op), "err", derr)
-		default:
-			logger.Info("query", "op", string(op), "code", r.Code, "value", string(r.Value), "error", r.Error, "latency", latency)
-		}
-		timer.Reset(wait(o))
-	}
-}
-
-func wait(o options) time.Duration {
-	return o.minWait + rand.N(o.maxWait-o.minWait+1)
-}
-
-func randomOp(keys int) ([]byte, error) {
-	key := fmt.Sprintf("k%d", rand.N(keys))
-	switch p := rand.N(10); {
-	case p < 4:
-		return kvservice.Read(key)
-	case p < 8:
-		return kvservice.Write(key, rand.N(100))
-	default:
-		return kvservice.CAS(key, rand.N(100), rand.N(100))
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }

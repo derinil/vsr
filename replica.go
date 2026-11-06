@@ -96,6 +96,7 @@ type Replica struct {
 	savedEpoch   uint64
 	checkpointed uint64
 	checkpoints  chan protocol.Checkpoint
+	process      processSampler
 }
 
 // New creates a Replica, restoring persisted state, and starts listening.
@@ -321,7 +322,7 @@ func (s *Replica) handOffCheckpoint() {
 		return
 	}
 	s.checkpointed = c.OpNum
-	s.log.Info("checkpoint updated", "op", c.OpNum)
+	s.log.Debug("checkpoint updated", "op", c.OpNum)
 	if s.checkpoints != nil {
 		s.queueCheckpoint(*c)
 	}
@@ -355,7 +356,7 @@ func (s *Replica) logTransition(prev, cur State) {
 		s.log.Info("epoch changed", attrs...)
 	}
 	if cur.LogBase != prev.LogBase {
-		s.log.Info("log base advanced", "base", cur.LogBase, "op", cur.OpNum, "commit", cur.CommitNum)
+		s.log.Debug("log base advanced", "base", cur.LogBase, "op", cur.OpNum, "commit", cur.CommitNum)
 	}
 	switch {
 	case cur.Status == protocol.StatusShutdown && prev.Status != protocol.StatusShutdown:
