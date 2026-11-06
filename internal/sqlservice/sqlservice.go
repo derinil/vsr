@@ -1,13 +1,9 @@
 // Package sqlservice is a SQLite vsr.Service. Each op is a list of statements
 // executed atomically in one transaction against an in-memory database.
 //
-// Statements that could make replicas diverge are rejected: transaction
-// control, ATTACH, temporary schema objects, writing pragmas, random(),
-// randomblob() and load_extension().
-//
-// Date and time functions are allowed, but each replica reads its own clock
-// for 'now' and CURRENT_DATE, CURRENT_TIME and CURRENT_TIMESTAMP, so writing
-// their results makes replicas diverge. Pass the time as an argument instead.
+// Nothing is rejected, so ops must be deterministic: random(), the current
+// time, ATTACH, temporary schema objects and connection pragmas make replicas
+// diverge.
 package sqlservice
 
 import (
@@ -17,9 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
-	"modernc.org/sqlite"
+	_ "modernc.org/sqlite"
 )
 
 // Stmt is one SQL statement with positional arguments. Arguments are JSON
@@ -49,22 +44,6 @@ var (
 	errCorrupt      = errors.New("corrupt snapshot")
 )
 
-var readOnlyPragmas = map[string]bool{
-	"table_info":       true,
-	"table_xinfo":      true,
-	"table_list":       true,
-	"index_list":       true,
-	"index_info":       true,
-	"index_xinfo":      true,
-	"foreign_key_list": true,
-}
-
-var nondeterministic = map[string]bool{
-	"random":         true,
-	"randomblob":     true,
-	"load_extension": true,
-}
-
 type serializer interface {
 	Serialize() ([]byte, error)
 	Deserialize([]byte) error
@@ -74,7 +53,6 @@ type serializer interface {
 type Store struct {
 	db   *sql.DB
 	conn *sql.Conn
-	user bool
 }
 
 // New returns an empty Store.
@@ -99,12 +77,6 @@ func open(db *sql.DB) (*Store, error) {
 	}
 	s := &Store{db: db, conn: conn}
 	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = ON; PRAGMA user_version = 0"); err != nil {
-		return nil, err
-	}
-	err = conn.Raw(func(c any) error {
-		return c.(sqlite.AuthorizerRegisterer).RegisterAuthorizer(s.authorize)
-	})
-	if err != nil {
 		return nil, err
 	}
 	empty, err := s.serialize()
@@ -145,9 +117,7 @@ func (s *Store) run(stmts []Stmt) (_ []Rows, err error) {
 	if err != nil {
 		return nil, err
 	}
-	s.user = true
 	defer func() {
-		s.user = false
 		if err != nil {
 			tx.Rollback()
 		}
@@ -158,7 +128,6 @@ func (s *Store) run(stmts []Stmt) (_ []Rows, err error) {
 			return nil, fmt.Errorf("statement %d: %w", i, err)
 		}
 	}
-	s.user = false
 	return out, tx.Commit()
 }
 
@@ -191,26 +160,6 @@ func query(ctx context.Context, tx *sql.Tx, st Stmt) (Rows, error) {
 		err = tx.QueryRowContext(ctx, "SELECT changes()").Scan(&r.Changes)
 	}
 	return r, err
-}
-
-func (s *Store) authorize(action sqlite.AuthorizerActionCode, arg1, arg2, _, _ string) sqlite.AuthorizerReturnCode {
-	if !s.user {
-		return sqlite.AuthorizerOK
-	}
-	switch action {
-	case sqlite.AuthTransaction, sqlite.AuthSavepoint, sqlite.AuthAttach, sqlite.AuthDetach,
-		sqlite.AuthCreateTempTable, sqlite.AuthCreateTempIndex, sqlite.AuthCreateTempView, sqlite.AuthCreateTempTrigger:
-		return sqlite.AuthorizerDeny
-	case sqlite.AuthPragma:
-		if !readOnlyPragmas[strings.ToLower(arg1)] {
-			return sqlite.AuthorizerDeny
-		}
-	case sqlite.AuthFunction:
-		if nondeterministic[strings.ToLower(arg2)] {
-			return sqlite.AuthorizerDeny
-		}
-	}
-	return sqlite.AuthorizerOK
 }
 
 // Snapshot returns the database file image, which is identical on replicas

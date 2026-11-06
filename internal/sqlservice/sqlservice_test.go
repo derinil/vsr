@@ -91,39 +91,27 @@ func TestExecute(t *testing.T) {
 	}
 }
 
-func TestRejectsNondeterminism(t *testing.T) {
+func TestNothingBlocked(t *testing.T) {
 	for _, q := range []string{
-		"BEGIN",
-		"COMMIT",
-		"SAVEPOINT x",
 		"SELECT random()",
 		"SELECT randomblob(4)",
-		"ATTACH 'x.db' AS x",
+		"SELECT datetime('now')",
 		"CREATE TEMP TABLE t (a)",
 		"PRAGMA user_version = 1",
-		"PRAGMA foreign_keys = OFF",
-		"SELECT load_extension('x')",
-		"VACUUM INTO 'x.db'",
 	} {
 		s := newStore(t)
-		before := s.Snapshot()
 		op, _ := Encode(Query(q))
-		r, err := DecodeResult(s.Execute(op))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if r.Error == "" {
-			t.Errorf("%s succeeded: %+v", q, r.Results)
-		}
-		if !bytes.Equal(s.Snapshot(), before) {
-			t.Errorf("%s changed the database", q)
+		if r, _ := DecodeResult(s.Execute(op)); r.Error != "" {
+			t.Errorf("%s: %s", q, r.Error)
 		}
 	}
 }
 
-func TestStillUsableAfterRejection(t *testing.T) {
+func TestUsableAfterTransactionControl(t *testing.T) {
 	s := newStore(t)
-	s.Execute([]byte(`[{"sql":"BEGIN"}]`))
+	for _, q := range []string{"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT x"} {
+		s.Execute([]byte(`[{"sql":"` + q + `"}]`))
+	}
 	s.Execute([]byte(schema))
 	if got := string(s.Execute([]byte(`[{"sql":"INSERT INTO kv VALUES (1, 1)"}]`))); got != `{"results":[{"changes":1}]}` {
 		t.Fatal(got)
