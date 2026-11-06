@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -11,7 +13,7 @@ import (
 	"time"
 
 	"github.com/derinil/vsr"
-	"github.com/derinil/vsr/internal/kvservice"
+	"github.com/derinil/vsr/internal/sqlservice"
 )
 
 type loadStats struct {
@@ -68,6 +70,13 @@ func (r *register) check(v int) error {
 	return nil
 }
 
+const (
+	schemaSQL = "CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v INTEGER NOT NULL)"
+	readSQL   = "SELECT v FROM kv WHERE k = ?"
+	writeSQL  = "INSERT INTO kv VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v"
+	casSQL    = "UPDATE kv SET v = ? WHERE k = ? AND v = ?"
+)
+
 func worker(ctx context.Context, id int, config []string, o options, stats *loadStats, logger *slog.Logger) {
 	cl, err := vsr.NewClient(vsr.ClientOptions{Config: config})
 	if err != nil {
@@ -75,6 +84,31 @@ func worker(ctx context.Context, id int, config []string, o options, stats *load
 		return
 	}
 	defer cl.Close()
+	invoke := func(op []byte) (sqlservice.Result, time.Duration, error) {
+		qctx, cancel := context.WithTimeout(ctx, o.timeout)
+		defer cancel()
+		start := time.Now()
+		b, err := cl.Invoke(qctx, op)
+		latency := time.Since(start)
+		if err != nil {
+			return sqlservice.Result{}, latency, err
+		}
+		r, err := sqlservice.DecodeResult(b)
+		if err == nil && r.Error != "" {
+			err = errors.New(r.Error)
+		}
+		return r, latency, err
+	}
+	schema, err := sqlservice.Encode(sqlservice.Query(schemaSQL))
+	if err != nil {
+		logger.Error("encode schema", "err", err)
+		return
+	}
+	for ctx.Err() == nil {
+		if _, _, err := invoke(schema); err == nil {
+			break
+		}
+	}
 	reg := &register{key: "c" + strconv.Itoa(id)}
 	for ctx.Err() == nil {
 		op, verify, err := nextOp(reg, o.keys)
@@ -82,44 +116,35 @@ func worker(ctx context.Context, id int, config []string, o options, stats *load
 			logger.Error("encode query", "err", err)
 			return
 		}
-		qctx, cancel := context.WithTimeout(ctx, o.timeout)
-		start := time.Now()
-		b, err := cl.Invoke(qctx, op)
-		cancel()
-		latency := time.Since(start)
+		r, latency, err := invoke(op)
 		if ctx.Err() != nil {
 			return
 		}
-		r, derr := kvservice.DecodeResult(b)
-		ok := err == nil && derr == nil && r.Code != kvservice.CodeMalformed
 		var violation error
-		if ok && verify != nil {
+		if err == nil && verify != nil {
 			violation = verify(r)
 		}
 		if violation != nil {
 			logger.Error("consistency violation", "client", id, "err", violation)
 		}
-		stats.record(latency, ok, violation != nil)
+		stats.record(latency, err == nil, violation != nil)
 	}
 }
 
-func nextOp(reg *register, keys int) ([]byte, func(kvservice.Result) error, error) {
+func nextOp(reg *register, keys int) ([]byte, func(sqlservice.Result) error, error) {
 	switch p := rand.N(10); {
 	case p < 2:
 		reg.attempted++
 		v := reg.attempted
-		op, err := kvservice.Write(reg.key, v)
-		return op, func(kvservice.Result) error {
+		op, err := sqlservice.Encode(sqlservice.Query(writeSQL, reg.key, v))
+		return op, func(sqlservice.Result) error {
 			reg.acked = v
 			return nil
 		}, err
 	case p < 4:
-		op, err := kvservice.Read(reg.key)
-		return op, func(r kvservice.Result) error {
-			if r.Code == kvservice.CodeNotFound {
-				return reg.check(0)
-			}
-			v, err := strconv.Atoi(string(r.Value))
+		op, err := sqlservice.Encode(sqlservice.Query(readSQL, reg.key))
+		return op, func(r sqlservice.Result) error {
+			v, err := readValue(r)
 			if err != nil {
 				return fmt.Errorf("read %s: %w", reg.key, err)
 			}
@@ -131,15 +156,34 @@ func nextOp(reg *register, keys int) ([]byte, func(kvservice.Result) error, erro
 	}
 }
 
+func readValue(r sqlservice.Result) (int, error) {
+	if len(r.Results) != 1 {
+		return 0, fmt.Errorf("got %d results", len(r.Results))
+	}
+	switch rows := r.Results[0].Rows; len(rows) {
+	case 0:
+		return 0, nil
+	case 1:
+		n, ok := rows[0][0].(json.Number)
+		if !ok {
+			return 0, fmt.Errorf("value %v is not a number", rows[0][0])
+		}
+		v, err := n.Int64()
+		return int(v), err
+	default:
+		return 0, fmt.Errorf("got %d rows", len(rows))
+	}
+}
+
 func randomOp(keys int) ([]byte, error) {
 	key := fmt.Sprintf("k%d", rand.N(keys))
 	switch p := rand.N(10); {
 	case p < 4:
-		return kvservice.Read(key)
+		return sqlservice.Encode(sqlservice.Query(readSQL, key))
 	case p < 8:
-		return kvservice.Write(key, rand.N(100))
+		return sqlservice.Encode(sqlservice.Query(writeSQL, key, rand.N(100)))
 	default:
-		return kvservice.CAS(key, rand.N(100), rand.N(100))
+		return sqlservice.Encode(sqlservice.Query(casSQL, rand.N(100), key, rand.N(100)))
 	}
 }
 

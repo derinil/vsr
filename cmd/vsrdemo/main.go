@@ -1,4 +1,4 @@
-// Command vsrdemo runs a local key-value cluster with one OS process per
+// Command vsrdemo runs a local SQLite cluster with one OS process per
 // replica, spare replicas ready to join it, many concurrent clients driving
 // load, a chaos agent injecting crashes, pauses, partitions and lossy links,
 // and the monitor dashboard.

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/derinil/vsr"
-	"github.com/derinil/vsr/internal/kvservice"
+	"github.com/derinil/vsr/internal/sqlservice"
 	"github.com/derinil/vsr/internal/vsrtcp"
 	"github.com/derinil/vsr/message"
 )
@@ -41,12 +41,17 @@ func runNode(args []string) error {
 		f.control(os.Stdin)
 		cancel()
 	}()
+	svc, err := sqlservice.New()
+	if err != nil {
+		return err
+	}
+	defer svc.Close()
 	r, err := vsr.NewReplica(vsr.ReplicaOptions{
 		Addr:         *addr,
 		Listen:       *addr,
 		HTTPAddr:     *httpAddr,
 		Config:       strings.Split(*config, ","),
-		Service:      kvservice.New(),
+		Service:      svc,
 		DataDir:      *data,
 		Join:         *join,
 		Logger:       slog.New(slog.NewTextHandler(os.Stderr, nil)),

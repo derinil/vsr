@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derinil/vsr/internal/kvservice"
+	"github.com/derinil/vsr/internal/sqlservice"
 	"github.com/derinil/vsr/internal/vsrstatus"
 )
 
@@ -100,17 +100,32 @@ func TestRegister(t *testing.T) {
 	}
 }
 
+func newService(t *testing.T) *sqlservice.Store {
+	t.Helper()
+	s, err := sqlservice.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	op, _ := sqlservice.Encode(sqlservice.Query(schemaSQL))
+	s.Execute(op)
+	return s
+}
+
 func TestRandomOpVerifiesOwnKey(t *testing.T) {
-	s := kvservice.New()
+	s := newService(t)
 	reg := &register{key: "c0"}
 	for range 500 {
 		op, verify, err := nextOp(reg, 3)
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := kvservice.DecodeResult(s.Execute(op))
+		r, err := sqlservice.DecodeResult(s.Execute(op))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if r.Error != "" {
+			t.Fatalf("op %s: %s", op, r.Error)
 		}
 		if verify != nil {
 			if err := verify(r); err != nil {
@@ -121,18 +136,18 @@ func TestRandomOpVerifiesOwnKey(t *testing.T) {
 }
 
 func TestRandomOpExecutes(t *testing.T) {
-	s := kvservice.New()
+	s := newService(t)
 	for range 200 {
 		op, err := randomOp(3)
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := kvservice.DecodeResult(s.Execute(op))
+		r, err := sqlservice.DecodeResult(s.Execute(op))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.Code == kvservice.CodeMalformed {
-			t.Fatalf("op %s malformed: %s", op, r.Error)
+		if r.Error != "" {
+			t.Fatalf("op %s: %s", op, r.Error)
 		}
 	}
 }
