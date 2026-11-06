@@ -19,12 +19,13 @@ const (
 	// DefaultPort is the default listen port.
 	DefaultPort = 10188
 
-	defaultTick              = 10 * time.Millisecond
-	defaultHeartbeat         = 100 * time.Millisecond
-	defaultViewChangeTimeout = 500 * time.Millisecond
-	defaultResend            = 200 * time.Millisecond
-	defaultInboxSize         = 65536
-	maxBurst                 = 1024
+	defaultTick               = 10 * time.Millisecond
+	defaultHeartbeat          = 100 * time.Millisecond
+	defaultViewChangeTimeout  = 500 * time.Millisecond
+	defaultResend             = 200 * time.Millisecond
+	defaultCheckpointInterval = 1000
+	defaultInboxSize          = 65536
+	maxBurst                  = 1024
 )
 
 var errAlreadyRunning = errors.New("vsrreplica: already running")
@@ -55,6 +56,12 @@ type Options struct {
 	ViewChangeTimeout time.Duration
 	// Resend is the retransmission interval.
 	Resend time.Duration
+	// CheckpointInterval is the ops between checkpoints; 0 selects 1000 for Snapshotter services, negative disables.
+	CheckpointInterval int
+	// CheckpointRetain is the committed ops kept before log GC; 0 uses CheckpointInterval.
+	CheckpointRetain int
+	// PageSize is the Merkle page size for checkpoint transfer; 0 uses 4096.
+	PageSize int
 	// InboxSize bounds queued inbound messages; excess is dropped.
 	InboxSize int
 	// Logger receives state transition logs; defaults to slog.Default.
@@ -68,20 +75,23 @@ type State struct {
 	View      uint64
 	OpNum     uint64
 	CommitNum uint64
+	LogBase   uint64
 	Primary   bool
 }
 
 // Server hosts a single replica.
 type Server struct {
-	opts       Options
-	log        *slog.Logger
-	inbox      chan vsr.Message
-	transport  vsr.Transport
-	replica    *vsr.Replica
-	running    atomic.Bool
-	state      atomic.Pointer[State]
-	last       State
-	savedEpoch uint64
+	opts         Options
+	log          *slog.Logger
+	inbox        chan vsr.Message
+	transport    vsr.Transport
+	replica      *vsr.Replica
+	running      atomic.Bool
+	state        atomic.Pointer[State]
+	last         State
+	savedEpoch   uint64
+	checkpointed uint64
+	checkpoints  chan vsr.Checkpoint
 }
 
 // New creates a Server, restoring persisted state, and starts listening.
@@ -97,15 +107,18 @@ func New(o Options) (*Server, error) {
 	}
 
 	ro := vsr.Options{
-		Addr:            o.Addr,
-		Config:          o.Config,
-		Service:         o.Service,
-		Recovering:      o.Recovering,
-		Join:            o.Join,
-		Seed:            time.Now().UnixNano(),
-		HeartbeatTicks:  ticks(o.Tick, o.Heartbeat),
-		ViewChangeTicks: ticks(o.Tick, o.ViewChangeTimeout),
-		ResendTicks:     ticks(o.Tick, o.Resend),
+		Addr:               o.Addr,
+		Config:             o.Config,
+		Service:            o.Service,
+		Recovering:         o.Recovering,
+		Join:               o.Join,
+		Seed:               time.Now().UnixNano(),
+		HeartbeatTicks:     ticks(o.Tick, o.Heartbeat),
+		ViewChangeTicks:    ticks(o.Tick, o.ViewChangeTimeout),
+		ResendTicks:        ticks(o.Tick, o.Resend),
+		CheckpointInterval: o.CheckpointInterval,
+		CheckpointRetain:   o.CheckpointRetain,
+		PageSize:           o.PageSize,
 	}
 	if found {
 		ro.Config, ro.Epoch, ro.OldConfig = st.Config, st.Epoch, st.OldConfig
@@ -121,6 +134,16 @@ func New(o Options) (*Server, error) {
 	}
 	if found && len(o.Config) > 0 && !slices.Equal(st.Config, o.Config) {
 		s.log.Warn("config option differs from persisted config, using persisted config", "data", o.DataDir)
+	}
+	if o.DataDir != "" && ro.Recovering {
+		c, err := loadCheckpoint(o.DataDir)
+		switch {
+		case err != nil:
+			s.log.Warn("ignoring checkpoint", "data", o.DataDir, "err", err)
+		case c != nil:
+			ro.Checkpoint = c
+			s.checkpointed = c.OpNum
+		}
 	}
 	s.transport = o.NewTransport(s.deliver)
 	ro.Outbox = s.transport
@@ -161,6 +184,10 @@ func (o Options) withDefaults() Options {
 	o.ViewChangeTimeout = orDefault(o.ViewChangeTimeout, defaultViewChangeTimeout)
 	o.Resend = orDefault(o.Resend, defaultResend)
 	o.InboxSize = orDefault(o.InboxSize, defaultInboxSize)
+	if _, ok := o.Service.(vsr.Snapshotter); ok && o.CheckpointInterval == 0 {
+		o.CheckpointInterval = defaultCheckpointInterval
+	}
+	o.CheckpointInterval = max(o.CheckpointInterval, 0)
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
@@ -184,6 +211,15 @@ func (s *Server) Run(ctx context.Context) error {
 		return errAlreadyRunning
 	}
 	s.log.Info("replica started", "listen", s.opts.Listen, "recovering", s.last.Status == vsr.StatusRecovering)
+	if s.opts.DataDir != "" {
+		s.checkpoints = make(chan vsr.Checkpoint, 1)
+		done := make(chan struct{})
+		go s.writeCheckpoints(done)
+		defer func() {
+			close(s.checkpoints)
+			<-done
+		}()
+	}
 
 	ticker := time.NewTicker(s.opts.Tick)
 	defer ticker.Stop()
@@ -235,6 +271,7 @@ func (s *Server) snapshot() State {
 		View:      r.View(),
 		OpNum:     r.OpNum(),
 		CommitNum: r.CommitNum(),
+		LogBase:   r.LogBase(),
 		Primary:   r.IsPrimary(),
 	}
 }
@@ -261,13 +298,51 @@ func (s *Server) observe() error {
 	s.logTransition(s.last, cur)
 	s.last = cur
 	s.state.Store(&cur)
+	s.handOffCheckpoint()
 	return nil
+}
+
+func (s *Server) handOffCheckpoint() {
+	c := s.replica.Checkpoint()
+	if c == nil || c.OpNum <= s.checkpointed {
+		return
+	}
+	s.checkpointed = c.OpNum
+	s.log.Info("checkpoint updated", "op", c.OpNum)
+	if s.checkpoints != nil {
+		s.queueCheckpoint(*c)
+	}
+}
+
+func (s *Server) queueCheckpoint(c vsr.Checkpoint) {
+	select {
+	case s.checkpoints <- c:
+		return
+	default:
+	}
+	select {
+	case <-s.checkpoints:
+	default:
+	}
+	s.checkpoints <- c
+}
+
+func (s *Server) writeCheckpoints(done chan<- struct{}) {
+	defer close(done)
+	for c := range s.checkpoints {
+		if err := saveCheckpoint(s.opts.DataDir, c); err != nil {
+			s.log.Error("save checkpoint", "op", c.OpNum, "err", err)
+		}
+	}
 }
 
 func (s *Server) logTransition(prev, cur State) {
 	attrs := []any{"epoch", cur.Epoch, "view", cur.View, "status", cur.Status, "op", cur.OpNum, "commit", cur.CommitNum}
 	if cur.Epoch != prev.Epoch {
 		s.log.Info("epoch changed", attrs...)
+	}
+	if cur.LogBase != prev.LogBase {
+		s.log.Info("log base advanced", "base", cur.LogBase, "op", cur.OpNum, "commit", cur.CommitNum)
 	}
 	switch {
 	case cur.Status == vsr.StatusShutdown && prev.Status != vsr.StatusShutdown:

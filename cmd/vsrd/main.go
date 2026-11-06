@@ -43,6 +43,9 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 	heartbeat := fs.Duration("heartbeat", 100*time.Millisecond, "primary heartbeat interval")
 	viewChange := fs.Duration("view-change-timeout", 500*time.Millisecond, "backup timeout on primary silence, jittered up to 2x")
 	resend := fs.Duration("resend", 200*time.Millisecond, "resend interval for view change and recovery messages")
+	checkpointInterval := fs.Int("checkpoint-interval", envInt(getenv, "VSR_CHECKPOINT_INTERVAL"), "ops between checkpoints, 0 selects 1000, negative disables (env VSR_CHECKPOINT_INTERVAL)")
+	checkpointRetain := fs.Int("checkpoint-retain", envInt(getenv, "VSR_CHECKPOINT_RETAIN"), "committed ops kept before log GC, 0 uses the checkpoint interval (env VSR_CHECKPOINT_RETAIN)")
+	pageSize := fs.Int("page-size", envInt(getenv, "VSR_PAGE_SIZE"), "Merkle page size for checkpoint transfer, 0 selects 4096 (env VSR_PAGE_SIZE)")
 	fs.Parse(args)
 
 	cfg := splitList(*config)
@@ -53,17 +56,20 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 		return vsrreplica.Options{}, errors.New("-config (VSR_CONFIG) is required")
 	}
 	return vsrreplica.Options{
-		Addr:              *addr,
-		Listen:            *listen,
-		Config:            cfg,
-		Service:           kvservice.New(),
-		DataDir:           *data,
-		Recovering:        *recovering,
-		Join:              *join,
-		Tick:              *tick,
-		Heartbeat:         *heartbeat,
-		ViewChangeTimeout: *viewChange,
-		Resend:            *resend,
+		Addr:               *addr,
+		Listen:             *listen,
+		Config:             cfg,
+		Service:            kvservice.New(),
+		DataDir:            *data,
+		Recovering:         *recovering,
+		Join:               *join,
+		Tick:               *tick,
+		Heartbeat:          *heartbeat,
+		ViewChangeTimeout:  *viewChange,
+		Resend:             *resend,
+		CheckpointInterval: *checkpointInterval,
+		CheckpointRetain:   *checkpointRetain,
+		PageSize:           *pageSize,
 	}, nil
 }
 
@@ -86,6 +92,11 @@ func envOr(getenv func(string) string, key, fallback string) string {
 
 func envBool(getenv func(string) string, key string) bool {
 	v, _ := strconv.ParseBool(getenv(key))
+	return v
+}
+
+func envInt(getenv func(string) string, key string) int {
+	v, _ := strconv.Atoi(getenv(key))
 	return v
 }
 

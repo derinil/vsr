@@ -1,7 +1,9 @@
 package vsrreplica_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,15 +39,17 @@ type node struct {
 	dir    string
 	config []string
 	join   bool
+	svc    *kvservice.Store
 	srv    *vsrreplica.Server
 	cancel context.CancelFunc
 	done   chan error
 }
 
 type cluster struct {
-	t     *testing.T
-	addrs []string
-	nodes []*node
+	t                  *testing.T
+	addrs              []string
+	nodes              []*node
+	checkpointInterval int
 }
 
 func newCluster(t *testing.T, addrs []string) *cluster {
@@ -63,9 +67,14 @@ func newCluster(t *testing.T, addrs []string) *cluster {
 }
 
 func startCluster(t *testing.T, n int) *cluster {
+	return startClusterWith(t, n, 0)
+}
+
+func startClusterWith(t *testing.T, n, checkpointInterval int) *cluster {
 	t.Helper()
 	addrs := freeAddrs(t, n)
 	c := newCluster(t, addrs)
+	c.checkpointInterval = checkpointInterval
 	for i := range n {
 		c.add(i, addrs, false)
 	}
@@ -82,18 +91,20 @@ func (c *cluster) add(i int, config []string, join bool) {
 
 func (c *cluster) create(i int) *vsrreplica.Server {
 	n := c.nodes[i]
+	n.svc = kvservice.New()
 	s, err := vsrreplica.New(vsrreplica.Options{
-		Addr:              n.addr,
-		Listen:            n.addr,
-		Config:            n.config,
-		Join:              n.join,
-		Service:           kvservice.New(),
-		DataDir:           n.dir,
-		Tick:              testTick,
-		Heartbeat:         testHeartbeat,
-		ViewChangeTimeout: testViewChange,
-		Resend:            testResend,
-		Logger:            slog.New(slog.DiscardHandler),
+		Addr:               n.addr,
+		Listen:             n.addr,
+		Config:             n.config,
+		Join:               n.join,
+		Service:            n.svc,
+		DataDir:            n.dir,
+		Tick:               testTick,
+		Heartbeat:          testHeartbeat,
+		ViewChangeTimeout:  testViewChange,
+		Resend:             testResend,
+		CheckpointInterval: c.checkpointInterval,
+		Logger:             slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		c.t.Fatalf("New(replica %d): %v", i, err)
@@ -286,6 +297,18 @@ type persistedState struct {
 	Epoch     uint64   `json:"epoch"`
 	Config    []string `json:"config"`
 	OldConfig []string `json:"old_config"`
+}
+
+func readCheckpointFile(dir string) ([]byte, vsr.Checkpoint, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "checkpoint.bin"))
+	if err != nil {
+		return nil, vsr.Checkpoint{}, err
+	}
+	if len(b) < sha256.Size {
+		return nil, vsr.Checkpoint{}, errors.New("short checkpoint file")
+	}
+	c, err := vsr.DecodeCheckpoint(b[sha256.Size:])
+	return b, c, err
 }
 
 func readPersistedState(t *testing.T, dir string) persistedState {
@@ -677,6 +700,81 @@ func TestJoinerRestartBeforeJoining(t *testing.T) {
 	}
 }
 
+func TestRestartFromCheckpoint(t *testing.T) {
+	const interval, writes, victim = 5, 12, 2
+	tests := []struct {
+		name     string
+		corrupt  func([]byte) []byte
+		restored bool
+	}{
+		{"intact", nil, true},
+		{"truncated", func(b []byte) []byte { return b[:len(b)/2] }, false},
+		{"flipped byte", func(b []byte) []byte { b[len(b)-1] ^= 0xff; return b }, false},
+		{"empty", func([]byte) []byte { return nil }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := startClusterWith(t, 3, interval)
+			cl := c.client(c.addrs)
+			writeAll(t, cl, "a", writes)
+			eventually(t, "checkpoints to persist on every replica", func() bool {
+				for _, n := range c.nodes {
+					if _, ckpt, err := readCheckpointFile(n.dir); err != nil || ckpt.OpNum < 2*interval {
+						return false
+					}
+				}
+				return true
+			})
+
+			c.stop(victim)
+			path := filepath.Join(c.nodes[victim].dir, "checkpoint.bin")
+			raw, ckpt, err := readCheckpointFile(c.nodes[victim].dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.corrupt != nil {
+				if err := os.WriteFile(path, tt.corrupt(raw), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			restarted := c.create(victim)
+			st := restarted.State()
+			if st.Status != vsr.StatusRecovering {
+				t.Fatalf("status before Run = %v, want %v", st.Status, vsr.StatusRecovering)
+			}
+			var want []byte
+			wantOp := uint64(0)
+			if tt.restored {
+				wantOp, want = ckpt.OpNum, ckpt.State
+			} else {
+				want = kvservice.New().Snapshot()
+			}
+			if st.CommitNum != wantOp || st.LogBase != wantOp {
+				t.Fatalf("restored commit %d base %d, want %d", st.CommitNum, st.LogBase, wantOp)
+			}
+			if !bytes.Equal(c.nodes[victim].svc.Snapshot(), want) {
+				t.Fatalf("restored service state does not match expected state")
+			}
+			c.run(victim)
+
+			writeAll(t, cl, "b", 3)
+			eventually(t, "restarted replica to converge", func() bool { return c.converged(c.addrs) })
+			readAll(t, cl, "a", writes)
+			readAll(t, cl, "b", 3)
+
+			for i := range c.nodes {
+				c.stop(i)
+			}
+			for i := 1; i < len(c.nodes); i++ {
+				if !bytes.Equal(c.nodes[i].svc.Snapshot(), c.nodes[0].svc.Snapshot()) {
+					t.Fatalf("replica %d service state differs from replica 0", i)
+				}
+			}
+		})
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	addrs := freeAddrs(t, 3)
 	tests := []struct {
@@ -687,6 +785,8 @@ func TestNewValidation(t *testing.T) {
 		{"address not in config", func(o *vsrreplica.Options) { o.Addr = "127.0.0.1:1" }},
 		{"duplicate address", func(o *vsrreplica.Options) { o.Config = []string{addrs[0], addrs[0], addrs[1]} }},
 		{"nil service", func(o *vsrreplica.Options) { o.Service = nil }},
+		{"negative checkpoint retain", func(o *vsrreplica.Options) { o.CheckpointRetain = -1 }},
+		{"negative page size", func(o *vsrreplica.Options) { o.PageSize = -1 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
