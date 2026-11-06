@@ -3,6 +3,7 @@ package vsrtcp
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -11,9 +12,11 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/derinil/vsr/vsr"
+	"github.com/derinil/vsr/vsrstatus"
 )
 
 const (
@@ -77,16 +80,55 @@ type Transport struct {
 	mu     sync.Mutex
 	closed bool
 	ln     net.Listener
-	peers  map[string]chan []byte
+	peers  map[string]*peer
 	conns  map[*conn]struct{}
 	routes map[uint64]*conn
 }
 
 var _ vsr.Transport = (*Transport)(nil)
 
+type peer struct {
+	addr    string
+	out     chan []byte
+	sent    atomic.Uint64
+	dropped atomic.Uint64
+	dials   atomic.Uint64
+
+	mu    sync.Mutex
+	up    bool
+	since time.Time
+}
+
+func (p *peer) markConnected(at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.up, p.since = true, at
+}
+
+func (p *peer) markDisconnected() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.up, p.since = false, time.Time{}
+}
+
+func (p *peer) status() vsrstatus.Peer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return vsrstatus.Peer{
+		Addr:      p.addr,
+		Connected: p.up,
+		Since:     p.since,
+		Queued:    len(p.out),
+		Sent:      p.sent.Load(),
+		Dropped:   p.dropped.Load(),
+		Dials:     p.dials.Load(),
+	}
+}
+
 type conn struct {
 	nc   net.Conn
 	out  chan []byte
+	peer *peer
 	quit chan struct{}
 	once sync.Once
 }
@@ -95,6 +137,9 @@ func (c *conn) close() {
 	c.once.Do(func() {
 		close(c.quit)
 		c.nc.Close()
+		if c.peer != nil {
+			c.peer.markDisconnected()
+		}
 	})
 }
 
@@ -106,7 +151,7 @@ func New(h vsr.Handler, o Options) *Transport {
 		opts:   o.withDefaults(),
 		ctx:    ctx,
 		cancel: cancel,
-		peers:  make(map[string]chan []byte),
+		peers:  make(map[string]*peer),
 		conns:  make(map[*conn]struct{}),
 		routes: make(map[uint64]*conn),
 	}
@@ -154,13 +199,27 @@ func (t *Transport) Send(to string, m vsr.Message) {
 	if t.closed {
 		return
 	}
-	out, ok := t.peers[to]
+	p, ok := t.peers[to]
 	if !ok {
-		out = make(chan []byte, t.opts.QueueSize)
-		t.peers[to] = out
-		t.wg.Go(func() { t.runPeer(to, out) })
+		p = &peer{addr: to, out: make(chan []byte, t.opts.QueueSize)}
+		t.peers[to] = p
+		t.wg.Go(func() { t.runPeer(p) })
 	}
-	enqueue(out, b)
+	if !enqueue(p.out, b) {
+		p.dropped.Add(1)
+	}
+}
+
+// Peers returns outbound peer stats sorted by address; it is safe for concurrent use.
+func (t *Transport) Peers() []vsrstatus.Peer {
+	t.mu.Lock()
+	out := make([]vsrstatus.Peer, 0, len(t.peers))
+	for _, p := range t.peers {
+		out = append(out, p.status())
+	}
+	t.mu.Unlock()
+	slices.SortFunc(out, func(a, b vsrstatus.Peer) int { return cmp.Compare(a.Addr, b.Addr) })
+	return out
 }
 
 // Reply sends m to a client over the connection it last sent from.
@@ -213,10 +272,12 @@ func (t *Transport) frame(m vsr.Message) []byte {
 	return b
 }
 
-func enqueue(out chan<- []byte, b []byte) {
+func enqueue(out chan<- []byte, b []byte) bool {
 	select {
 	case out <- b:
+		return true
 	default:
+		return false
 	}
 }
 
@@ -243,7 +304,7 @@ func (t *Transport) acceptLoop(ln net.Listener) {
 			}
 			continue
 		}
-		c, ok := t.newConn(nc, make(chan []byte, t.opts.QueueSize))
+		c, ok := t.newConn(nc, make(chan []byte, t.opts.QueueSize), nil)
 		if !ok {
 			return
 		}
@@ -251,10 +312,11 @@ func (t *Transport) acceptLoop(ln net.Listener) {
 	}
 }
 
-func (t *Transport) runPeer(addr string, out chan []byte) {
+func (t *Transport) runPeer(p *peer) {
 	for {
-		if nc, err := t.dial(addr); err == nil {
-			c, ok := t.newConn(nc, out)
+		p.dials.Add(1)
+		if nc, err := t.dial(p.addr); err == nil {
+			c, ok := t.newConn(nc, p.out, p)
 			if !ok {
 				return
 			}
@@ -271,15 +333,18 @@ func (t *Transport) dial(addr string) (net.Conn, error) {
 	return d.DialContext(t.ctx, "tcp", addr)
 }
 
-func (t *Transport) newConn(nc net.Conn, out chan []byte) (*conn, bool) {
+func (t *Transport) newConn(nc net.Conn, out chan []byte, p *peer) (*conn, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		nc.Close()
 		return nil, false
 	}
-	c := &conn{nc: nc, out: out, quit: make(chan struct{})}
+	c := &conn{nc: nc, out: out, peer: p, quit: make(chan struct{})}
 	t.conns[c] = struct{}{}
+	if p != nil {
+		p.markConnected(time.Now())
+	}
 	return c, true
 }
 
@@ -346,13 +411,18 @@ func (t *Transport) writeLoop(c *conn) {
 		case <-c.quit:
 			return
 		}
-		for n := len(c.out); n > 0; n-- {
+		written := 1
+		for pending := len(c.out); pending > 0; pending-- {
 			if _, err := w.Write(<-c.out); err != nil {
 				return
 			}
+			written++
 		}
 		if err := w.Flush(); err != nil {
 			return
+		}
+		if c.peer != nil {
+			c.peer.sent.Add(uint64(written))
 		}
 	}
 }

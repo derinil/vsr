@@ -35,14 +35,15 @@ const (
 )
 
 type node struct {
-	addr   string
-	dir    string
-	config []string
-	join   bool
-	svc    *kvservice.Store
-	srv    *vsrreplica.Server
-	cancel context.CancelFunc
-	done   chan error
+	addr     string
+	httpAddr string
+	dir      string
+	config   []string
+	join     bool
+	svc      *kvservice.Store
+	srv      *vsrreplica.Server
+	cancel   context.CancelFunc
+	done     chan error
 }
 
 type cluster struct {
@@ -95,6 +96,7 @@ func (c *cluster) create(i int) *vsrreplica.Server {
 	s, err := vsrreplica.New(vsrreplica.Options{
 		Addr:               n.addr,
 		Listen:             n.addr,
+		HTTPAddr:           n.httpAddr,
 		Config:             n.config,
 		Join:               n.join,
 		Service:            n.svc,

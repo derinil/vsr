@@ -35,6 +35,7 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 	fs := flag.NewFlagSet("vsrd", flag.ExitOnError)
 	addr := fs.String("addr", getenv("VSR_ADDR"), "this replica's address as it appears in -config (env VSR_ADDR)")
 	listen := fs.String("listen", envOr(getenv, "VSR_LISTEN", fmt.Sprintf(":%d", vsrreplica.DefaultPort)), "listen address (env VSR_LISTEN)")
+	httpAddr := fs.String("http", getenv("VSR_HTTP"), "status HTTP listen address serving GET /status, empty disables (env VSR_HTTP)")
 	config := fs.String("config", getenv("VSR_CONFIG"), "comma separated replica addresses in canonical order (env VSR_CONFIG)")
 	data := fs.String("data", getenv("VSR_DATA"), "directory for state.json, empty disables persistence (env VSR_DATA)")
 	recovering := fs.Bool("recover", false, "start with the recovery protocol")
@@ -58,6 +59,7 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 	return vsrreplica.Options{
 		Addr:               *addr,
 		Listen:             *listen,
+		HTTPAddr:           *httpAddr,
 		Config:             cfg,
 		Service:            kvservice.New(),
 		DataDir:            *data,

@@ -36,6 +36,8 @@ type Options struct {
 	Addr string
 	// Listen is the listen address.
 	Listen string
+	// HTTPAddr is the listen address for GET /status; empty disables it.
+	HTTPAddr string
 	// Config lists replica addresses in canonical order.
 	Config []string
 	// Service is the replicated state machine.
@@ -83,11 +85,15 @@ type State struct {
 type Server struct {
 	opts         Options
 	log          *slog.Logger
+	started      time.Time
 	inbox        chan vsr.Message
 	transport    vsr.Transport
+	peers        peerLister
 	replica      *vsr.Replica
 	running      atomic.Bool
-	state        atomic.Pointer[State]
+	published    atomic.Pointer[replicaView]
+	received     atomic.Uint64
+	inboxDropped atomic.Uint64
 	last         State
 	savedEpoch   uint64
 	checkpointed uint64
@@ -129,6 +135,7 @@ func New(o Options) (*Server, error) {
 	s := &Server{
 		opts:       o,
 		log:        o.Logger.With("addr", o.Addr),
+		started:    time.Now(),
 		inbox:      make(chan vsr.Message, o.InboxSize),
 		savedEpoch: st.Epoch,
 	}
@@ -146,6 +153,7 @@ func New(o Options) (*Server, error) {
 		}
 	}
 	s.transport = o.NewTransport(s.deliver)
+	s.peers, _ = s.transport.(peerLister)
 	ro.Outbox = s.transport
 	r, err := vsr.NewReplica(ro)
 	if err != nil {
@@ -164,9 +172,8 @@ func New(o Options) (*Server, error) {
 		}
 	}
 
-	snap := s.snapshot()
-	s.last = snap
-	s.state.Store(&snap)
+	s.last = s.snapshot()
+	s.published.Store(s.buildView(s.last))
 	return s, nil
 }
 
@@ -211,6 +218,14 @@ func (s *Server) Run(ctx context.Context) error {
 		return errAlreadyRunning
 	}
 	s.log.Info("replica started", "listen", s.opts.Listen, "recovering", s.last.Status == vsr.StatusRecovering)
+	if s.opts.HTTPAddr != "" {
+		stop, err := s.serveStatus()
+		if err != nil {
+			s.transport.Close()
+			return err
+		}
+		defer stop()
+	}
 	if s.opts.DataDir != "" {
 		s.checkpoints = make(chan vsr.Checkpoint, 1)
 		done := make(chan struct{})
@@ -241,13 +256,15 @@ func (s *Server) Run(ctx context.Context) error {
 
 // State returns the latest replica state. It is safe for concurrent use.
 func (s *Server) State() State {
-	return *s.state.Load()
+	return s.published.Load().State
 }
 
 func (s *Server) deliver(m vsr.Message) {
 	select {
 	case s.inbox <- m:
+		s.received.Add(1)
 	default:
+		s.inboxDropped.Add(1)
 	}
 }
 
@@ -297,8 +314,8 @@ func (s *Server) observe() error {
 	}
 	s.logTransition(s.last, cur)
 	s.last = cur
-	s.state.Store(&cur)
 	s.handOffCheckpoint()
+	s.published.Store(s.buildView(cur))
 	return nil
 }
 

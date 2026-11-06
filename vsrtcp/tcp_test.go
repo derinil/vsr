@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/derinil/vsr/vsr"
+	"github.com/derinil/vsr/vsrstatus"
 	"github.com/derinil/vsr/vsrtcp"
 )
 
@@ -352,6 +353,108 @@ func TestCloseIsIdempotent(t *testing.T) {
 	tr.Reply(1, vsr.Reply{})
 	if err := tr.Listen("127.0.0.1:0"); err == nil {
 		t.Fatal("Listen after Close should fail")
+	}
+}
+
+func waitPeer(t *testing.T, tr *vsrtcp.Transport, done func(vsrstatus.Peer) bool) vsrstatus.Peer {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ps := tr.Peers()
+		if len(ps) == 1 && done(ps[0]) {
+			return ps[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peer state not reached, peers = %+v", ps)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPeersEmpty(t *testing.T) {
+	tr := newTransport(t, func(vsr.Message) {}, vsrtcp.Options{})
+	if ps := tr.Peers(); ps == nil || len(ps) != 0 {
+		t.Fatalf("Peers() = %#v, want empty non-nil slice", ps)
+	}
+}
+
+func TestPeersStats(t *testing.T) {
+	tests := []struct {
+		name        string
+		reachable   bool
+		queueSize   int
+		sends       int
+		wantSent    uint64
+		wantDropped uint64
+		wantQueued  int
+	}{
+		{"delivered", true, 16, 5, 5, 0, 0},
+		{"unreachable queue fills", false, 4, 10, 0, 6, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := unusedAddr(t)
+			if tt.reachable {
+				h, _ := inbox(tt.sends)
+				addr = listen(t, newTransport(t, h, vsrtcp.Options{}))
+			}
+			sender := newTransport(t, func(vsr.Message) {}, vsrtcp.Options{QueueSize: tt.queueSize, Backoff: 10 * time.Millisecond})
+			for i := range tt.sends {
+				sender.Send(addr, vsr.Commit{CommitNum: uint64(i)})
+			}
+
+			p := waitPeer(t, sender, func(p vsrstatus.Peer) bool {
+				return p.Addr == addr && p.Connected == tt.reachable && p.Sent == tt.wantSent &&
+					p.Dropped == tt.wantDropped && p.Queued == tt.wantQueued && p.Dials > 0
+			})
+			if p.Since.IsZero() == tt.reachable {
+				t.Fatalf("Since = %v with Connected = %v", p.Since, p.Connected)
+			}
+		})
+	}
+}
+
+func TestPeersSortedByAddr(t *testing.T) {
+	sender := newTransport(t, func(vsr.Message) {}, vsrtcp.Options{})
+	addrs := []string{unusedAddr(t), unusedAddr(t), unusedAddr(t)}
+	for _, a := range addrs {
+		sender.Send(a, vsr.Commit{})
+	}
+	want := slices.Clone(addrs)
+	slices.Sort(want)
+
+	var got []string
+	for _, p := range sender.Peers() {
+		got = append(got, p.Addr)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Peers() addrs = %v, want %v", got, want)
+	}
+}
+
+func TestPeersTrackReconnects(t *testing.T) {
+	h1, ch1 := inbox(16)
+	srv1 := newTransport(t, h1, vsrtcp.Options{})
+	addr := listen(t, srv1)
+
+	client := newTransport(t, func(vsr.Message) {}, vsrtcp.Options{Backoff: 10 * time.Millisecond})
+	client.Send(addr, vsr.Commit{})
+	next(t, ch1)
+	waitPeer(t, client, func(p vsrstatus.Peer) bool { return p.Connected })
+
+	srv1.Close()
+	down := waitPeer(t, client, func(p vsrstatus.Peer) bool { return !p.Connected })
+	if !down.Since.IsZero() {
+		t.Fatalf("Since = %v while disconnected", down.Since)
+	}
+
+	srv2 := newTransport(t, func(vsr.Message) {}, vsrtcp.Options{})
+	if err := srv2.Listen(addr); err != nil {
+		t.Fatal(err)
+	}
+	up := waitPeer(t, client, func(p vsrstatus.Peer) bool { return p.Connected && p.Dials >= 2 })
+	if up.Since.IsZero() {
+		t.Fatal("Since is zero while connected")
 	}
 }
 

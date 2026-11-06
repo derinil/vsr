@@ -6,6 +6,7 @@ x-replica: &replica
   environment: &env
     VSR_CONFIG: vsr1:10188,vsr2:10188,vsr3:10188,vsr4:10188,vsr5:10188
     VSR_DATA: /data
+    VSR_HTTP: :8080
 
 services:
   vsr1:
@@ -47,3 +48,14 @@ services:
       VSR_ADDR: vsr5:10188
     ports:
       - "10192:10188"
+
+  vsrmon:
+    image: vsr:latest
+    restart: "no"
+    stop_grace_period: 1s
+    depends_on: [vsr1, vsr2, vsr3, vsr4, vsr5]
+    entrypoint: ["vsrmon"]
+    environment:
+      VSR_MON_NODES: vsr1:8080,vsr2:8080,vsr3:8080,vsr4:8080,vsr5:8080
+    ports:
+      - "8080:8080"
