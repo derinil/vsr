@@ -540,7 +540,7 @@ function cardHead(rep) {
       h('span', { class: 'addr' }, rep.addr || rep.url),
       rep.up && rep.node.primary && h('span', { class: 'pbadge', title: 'primary' }, 'P'),
     ),
-    h('span', { class: 'chip' }, statusOf(rep)),
+    h('div', { class: 'health' }, h('span', { class: 'health-label' }, 'Health:'), h('span', { class: 'chip' }, statusOf(rep))),
   );
 }
 

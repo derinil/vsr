@@ -497,9 +497,19 @@ h2 {
 
 .card-head {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.health-label {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .card-id {
@@ -519,20 +529,11 @@ h2 {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 6px;
   padding: 2px 9px;
   font-size: 12px;
   color: var(--c);
   background: color-mix(in srgb, var(--c) 14%, transparent);
   border-radius: 999px;
-}
-
-.chip::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--c);
 }
 
 .pbadge {
