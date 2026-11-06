@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -141,6 +142,103 @@ func TestCheckpointTree(t *testing.T) {
 			cp := checkpoint{Checkpoint: c, tree: buildMerkle(c.State, testPageSize)}
 			if cp.tree.size != len(tc.state) || cp.tree.root() != buildMerkle(cp.State, testPageSize).root() {
 				t.Fatal("tree does not describe checkpoint state")
+			}
+		})
+	}
+}
+
+type plainService struct{}
+
+func (plainService) Execute(op []byte) []byte { return op }
+
+func TestCheckpointOptions(t *testing.T) {
+	cp := &Checkpoint{OpNum: 4, State: (&recorder{}).Snapshot(), Clients: encodeClients(nil)}
+	badClients := &Checkpoint{OpNum: 4, Clients: []byte{0xFF}}
+	tests := []struct {
+		name    string
+		service Service
+		o       Options
+		invalid bool
+	}{
+		{"negative interval", &recorder{}, Options{CheckpointInterval: -1}, true},
+		{"negative retain", &recorder{}, Options{CheckpointInterval: 4, CheckpointRetain: -1}, true},
+		{"negative page size", &recorder{}, Options{CheckpointInterval: 4, PageSize: -1}, true},
+		{"interval needs snapshotter", plainService{}, Options{CheckpointInterval: 4}, true},
+		{"checkpoint needs recovering", &recorder{}, Options{Checkpoint: cp}, true},
+		{"checkpoint needs snapshotter", plainService{}, Options{Checkpoint: cp, Recovering: true}, true},
+		{"malformed checkpoint clients", &recorder{}, Options{Checkpoint: badClients, Recovering: true}, true},
+		{"interval with snapshotter", &recorder{}, Options{CheckpointInterval: 4, CheckpointRetain: 2, PageSize: 16}, false},
+		{"no checkpoints with plain service", plainService{}, Options{}, false},
+		{"restored checkpoint", &recorder{}, Options{Checkpoint: cp, Recovering: true}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			o := tc.o
+			o.Addr, o.Config, o.Service, o.Outbox = "r0", []string{"r0", "r1", "r2"}, tc.service, &outboxLog{}
+			r, err := NewReplica(o)
+			if tc.invalid {
+				if !errors.Is(err, ErrInvalidOptions) {
+					t.Fatalf("err = %v, want ErrInvalidOptions", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.Checkpoint == nil {
+				if r.LogBase() != 0 || r.Checkpoint() != nil {
+					t.Fatalf("fresh replica: base %d checkpoint %v", r.LogBase(), r.Checkpoint())
+				}
+				return
+			}
+			if r.Status() != StatusRecovering || r.LogBase() != 4 || r.OpNum() != 4 || r.CommitNum() != 4 {
+				t.Fatalf("restored replica: status %v base %d op %d commit %d", r.Status(), r.LogBase(), r.OpNum(), r.CommitNum())
+			}
+			if got := r.Checkpoint(); got == nil || got.OpNum != 4 {
+				t.Fatalf("Checkpoint() = %v, want op 4", got)
+			}
+		})
+	}
+}
+
+func TestCollectGarbage(t *testing.T) {
+	tests := []struct {
+		name     string
+		retain   uint64
+		base     uint64
+		commit   uint64
+		held     []uint64
+		wantBase uint64
+		wantHeld []uint64
+	}{
+		{"newest checkpoint past retain", 4, 0, 8, []uint64{4, 8}, 4, []uint64{4, 8}},
+		{"skips checkpoints still within retain", 4, 0, 12, []uint64{4, 8, 12}, 8, []uint64{8, 12}},
+		{"nothing past retain", 5, 0, 8, []uint64{4, 8}, 0, []uint64{8}},
+		{"base kept until superseded", 4, 4, 9, []uint64{4, 8}, 4, []uint64{4, 8}},
+		{"zero retain collects latest", 0, 0, 4, []uint64{4}, 4, []uint64{4}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Replica{checkpointRetain: tc.retain, base: tc.base, commitNum: tc.commit}
+			for op := tc.base + 1; op <= tc.commit; op++ {
+				r.log = append(r.log, Entry{RequestNum: op})
+			}
+			for _, n := range tc.held {
+				r.ckpts = append(r.ckpts, newCheckpoint(Checkpoint{OpNum: n}, testPageSize))
+			}
+			r.collectGarbage()
+			if r.base != tc.wantBase || r.OpNum() != tc.commit {
+				t.Fatalf("base %d op %d, want base %d op %d", r.base, r.OpNum(), tc.wantBase, tc.commit)
+			}
+			var held []uint64
+			for _, cp := range r.ckpts {
+				held = append(held, cp.OpNum)
+			}
+			if !slices.Equal(held, tc.wantHeld) {
+				t.Fatalf("held checkpoints %v, want %v", held, tc.wantHeld)
+			}
+			if len(r.log) > 0 && r.log[0].RequestNum != tc.wantBase+1 {
+				t.Fatalf("log starts at op %d, want %d", r.log[0].RequestNum, tc.wantBase+1)
 			}
 		})
 	}

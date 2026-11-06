@@ -1,6 +1,8 @@
 package vsr
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -28,9 +30,16 @@ type execution struct {
 }
 
 type snapshot struct {
-	epoch  uint64
-	config []string
-	old    []string
+	epoch      uint64
+	config     []string
+	old        []string
+	checkpoint *Checkpoint
+}
+
+type checkpointing struct {
+	interval int
+	retain   int
+	pageSize int
 }
 
 type cluster struct {
@@ -55,6 +64,8 @@ type cluster struct {
 	position     map[string]int
 	replies      []Reply
 	err          error
+	checkpoints  checkpointing
+	pagesTo      map[int]int
 }
 
 type recorder struct {
@@ -70,6 +81,37 @@ func (s *recorder) Execute(op []byte) []byte {
 	result := fmt.Sprintf("ok:%d:%s", pos, key)
 	s.c.observe(s.replica, pos, key, result)
 	return []byte(result)
+}
+
+func (s *recorder) Snapshot() []byte {
+	b := binary.AppendUvarint(nil, uint64(len(s.ops)))
+	for _, op := range s.ops {
+		b = binary.AppendUvarint(b, uint64(len(op)))
+		b = append(b, op...)
+	}
+	return b
+}
+
+func (s *recorder) Restore(state []byte) error {
+	n, k := binary.Uvarint(state)
+	if k <= 0 {
+		return errors.New("bad snapshot count")
+	}
+	state = state[k:]
+	ops := make([]string, 0, min(n, uint64(len(state))))
+	for range n {
+		l, k := binary.Uvarint(state)
+		if k <= 0 || l > uint64(len(state)-k) {
+			return errors.New("bad snapshot op")
+		}
+		ops = append(ops, string(state[k:k+int(l)]))
+		state = state[k+int(l):]
+	}
+	if len(state) != 0 {
+		return errors.New("trailing snapshot bytes")
+	}
+	s.ops = ops
+	return nil
 }
 
 type requestKind uint8
@@ -118,14 +160,21 @@ func opKey(client, req uint64) string {
 
 func newCluster(t *testing.T, n int, seed int64) *cluster {
 	t.Helper()
+	return newClusterWith(t, n, seed, checkpointing{})
+}
+
+func newClusterWith(t *testing.T, n int, seed int64, cp checkpointing) *cluster {
+	t.Helper()
 	c := &cluster{
-		t:         t,
-		seed:      seed,
-		config:    make([]string, n),
-		addrIndex: make(map[string]int, n),
-		rng:       rand.New(rand.NewPCG(uint64(seed), 0xc0ffee)),
-		control:   make(map[string]bool),
-		position:  make(map[string]int),
+		t:           t,
+		seed:        seed,
+		config:      make([]string, n),
+		addrIndex:   make(map[string]int, n),
+		rng:         rand.New(rand.NewPCG(uint64(seed), 0xc0ffee)),
+		control:     make(map[string]bool),
+		position:    make(map[string]int),
+		checkpoints: cp,
+		pagesTo:     make(map[int]int),
 	}
 	for i := range n {
 		c.config[i] = fmt.Sprintf("r%d", i)
@@ -166,6 +215,9 @@ func (c *cluster) start(i int, o Options) {
 	o.Service = svc
 	o.Outbox = simOutbox{c: c, from: i}
 	o.Seed = c.seed*1000 + int64(i)*100 + int64(c.incarnations[i])
+	o.CheckpointInterval = c.checkpoints.interval
+	o.CheckpointRetain = c.checkpoints.retain
+	o.PageSize = c.checkpoints.pageSize
 	r, err := NewReplica(o)
 	if err != nil {
 		c.t.Fatal(err)
@@ -176,7 +228,7 @@ func (c *cluster) start(i int, o Options) {
 
 func (c *cluster) crash(i int) {
 	r := c.replicas[i]
-	c.saved[i] = snapshot{epoch: r.Epoch(), config: r.Config(), old: r.OldConfig()}
+	c.saved[i] = snapshot{epoch: r.Epoch(), config: r.Config(), old: r.OldConfig(), checkpoint: r.Checkpoint()}
 	c.replicas[i] = nil
 }
 
@@ -189,7 +241,7 @@ func (c *cluster) restart(i int) {
 		c.start(i, Options{Join: true})
 		return
 	}
-	c.start(i, Options{Config: s.config, OldConfig: s.old, Epoch: s.epoch, Recovering: true})
+	c.start(i, Options{Config: s.config, OldConfig: s.old, Epoch: s.epoch, Recovering: true, Checkpoint: s.checkpoint})
 }
 
 func (c *cluster) isolate(i int) {
@@ -278,6 +330,9 @@ func (c *cluster) deliver(e envelope) {
 	if e.toClient {
 		c.receiveClient(e)
 		return
+	}
+	if p, ok := e.msg.(Pages); ok {
+		c.pagesTo[e.to] += len(p.Data)
 	}
 	if r := c.replicas[e.to]; r != nil {
 		r.Step(e.msg)

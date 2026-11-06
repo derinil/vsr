@@ -7,7 +7,7 @@ func (r *Replica) onRequest(m Request) {
 }
 
 func (r *Replica) prepareMsg(n uint64) Prepare {
-	return Prepare{Epoch: r.epoch, View: r.view, OpNum: n, CommitNum: r.commitNum, Entry: r.log[n-1]}
+	return Prepare{Epoch: r.epoch, View: r.view, OpNum: n, CommitNum: r.commitNum, Entry: r.entry(n)}
 }
 
 func (r *Replica) onPrepare(m Prepare) {
@@ -71,9 +71,13 @@ func (r *Replica) majorityAck() uint64 {
 }
 
 func (r *Replica) commitUpTo(k uint64) {
+	if r.commitNum < r.base {
+		r.commitTarget = max(r.commitTarget, k)
+		return
+	}
 	k = min(k, r.OpNum())
 	for r.commitNum < k {
-		e := r.log[r.commitNum]
+		e := r.entry(r.commitNum + 1)
 		var result []byte
 		if e.Kind == EntryOp {
 			result = r.service.Execute(e.Op)
@@ -82,6 +86,9 @@ func (r *Replica) commitUpTo(k uint64) {
 		r.clientTable[e.ClientID] = clientRecord{req: e.RequestNum, result: result}
 		if s, ok := r.inflight[e.ClientID]; ok && s == e.RequestNum {
 			delete(r.inflight, e.ClientID)
+		}
+		if r.checkpointInterval > 0 && r.commitNum%r.checkpointInterval == 0 {
+			r.takeCheckpoint()
 		}
 		if e.Kind == EntryReconfig && r.commitNum > r.epochStart {
 			r.switchEpoch(e)
@@ -105,7 +112,7 @@ func (r *Replica) resendPrepares() {
 		if i == r.index {
 			continue
 		}
-		for n := max(r.acked[i], r.commitNum) + 1; n <= last; n++ {
+		for n := max(r.acked[i], r.commitNum, r.base) + 1; n <= last; n++ {
 			r.send(i, r.prepareMsg(n))
 		}
 	}

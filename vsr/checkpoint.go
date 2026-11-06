@@ -36,6 +36,48 @@ type checkpoint struct {
 	tree *merkle
 }
 
+func newCheckpoint(c Checkpoint, pageSize int) checkpoint {
+	return checkpoint{Checkpoint: c, tree: buildMerkle(c.State, pageSize)}
+}
+
+func (r *Replica) restoreCheckpoint(c Checkpoint) error {
+	clients, err := decodeClients(c.Clients)
+	if err != nil {
+		return err
+	}
+	if err := r.snap.Restore(c.State); err != nil {
+		return err
+	}
+	r.clientTable = clients
+	r.base = c.OpNum
+	r.commitNum = c.OpNum
+	r.ckpts = []checkpoint{newCheckpoint(c, r.pageSize)}
+	return nil
+}
+
+func (r *Replica) takeCheckpoint() {
+	c := Checkpoint{OpNum: r.commitNum, State: r.snap.Snapshot(), Clients: encodeClients(r.clientTable)}
+	r.ckpts = append(r.ckpts, newCheckpoint(c, r.pageSize))
+	r.collectGarbage()
+}
+
+func (r *Replica) collectGarbage() {
+	base := r.base
+	for _, cp := range r.ckpts {
+		if cp.OpNum > r.base && cp.OpNum+r.checkpointRetain <= r.commitNum {
+			base = cp.OpNum
+		}
+	}
+	if base != r.base {
+		r.log = slices.Clone(r.entriesAfter(base))
+		r.base = base
+	}
+	latest := r.ckpts[len(r.ckpts)-1].OpNum
+	r.ckpts = slices.DeleteFunc(r.ckpts, func(cp checkpoint) bool {
+		return cp.OpNum != r.base && cp.OpNum != latest
+	})
+}
+
 func encodeClients(t map[uint64]clientRecord) []byte {
 	var e encoder
 	ids := slices.Sorted(maps.Keys(t))
@@ -66,4 +108,31 @@ func decodeClients(b []byte) (map[uint64]clientRecord, error) {
 		return nil, ErrMalformed
 	}
 	return t, nil
+}
+
+func (r *Replica) held(opNum uint64) (checkpoint, bool) {
+	for _, cp := range r.ckpts {
+		if cp.OpNum == opNum {
+			return cp, true
+		}
+	}
+	return checkpoint{}, false
+}
+
+func (r *Replica) install(cp checkpoint, clients map[uint64]clientRecord) error {
+	if err := r.snap.Restore(cp.State); err != nil {
+		return err
+	}
+	r.log = slices.Clone(r.entriesAfter(cp.OpNum))
+	r.base = cp.OpNum
+	r.commitNum = cp.OpNum
+	r.clientTable = clients
+	r.ckpts = []checkpoint{cp}
+	r.fetch = nil
+	r.rebuildInflight()
+	r.commitUpTo(r.commitTarget)
+	if r.status == StatusTransitioning {
+		r.tryFinishTransition()
+	}
+	return nil
 }

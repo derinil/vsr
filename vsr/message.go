@@ -185,18 +185,18 @@ type EpochStarted struct {
 	Replica int
 }
 
-// GetCheckpoint asks for a checkpoint at or after MinOpNum.
+// GetCheckpoint asks for a checkpoint at or after MinOpNum from a replica in Epoch.
 type GetCheckpoint struct {
-	MinOpNum uint64
-	From     string
+	Epoch, MinOpNum uint64
+	From            string
 }
 
-// CheckpointInfo describes the sender's latest checkpoint.
+// CheckpointInfo describes the sender's latest checkpoint and its epoch.
 type CheckpointInfo struct {
-	OpNum, Size uint64
-	PageSize    int
-	Root        []byte
-	Clients     []byte
+	Epoch, OpNum, Size uint64
+	PageSize           int
+	Root               []byte
+	Clients            []byte
 }
 
 // GetMerkle asks for the Merkle node hashes at Level and Indices in checkpoint OpNum.

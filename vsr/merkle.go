@@ -35,7 +35,23 @@ func (t *merkle) root() digest {
 }
 
 func (t *merkle) pages() int {
-	return max(1, (t.size+t.pageSize-1)/t.pageSize)
+	return pageCount(t.size, t.pageSize)
+}
+
+func pageCount(size, pageSize int) int {
+	return max(1, (size+pageSize-1)/pageSize)
+}
+
+func levelSize(pages, level int) int {
+	return (pages-1)>>level + 1
+}
+
+func topLevel(pages int) int {
+	top := 0
+	for levelSize(pages, top) > 1 {
+		top++
+	}
+	return top
 }
 
 func (t *merkle) node(level, i int) (digest, bool) {
@@ -46,7 +62,11 @@ func (t *merkle) node(level, i int) (digest, bool) {
 }
 
 func (t *merkle) covers(level, i int) (lo, hi int) {
-	return min(i<<level, t.pages()), min((i+1)<<level, t.pages())
+	return coversIn(t.pages(), level, i)
+}
+
+func coversIn(pages, level, i int) (lo, hi int) {
+	return min(i<<level, pages), min((i+1)<<level, pages)
 }
 
 func pageOf(data []byte, pageSize, i int) []byte {

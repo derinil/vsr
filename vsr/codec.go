@@ -115,9 +115,11 @@ func AppendMessage(dst []byte, m Message) []byte {
 		e.u64(m.Epoch)
 		e.int(m.Replica)
 	case GetCheckpoint:
+		e.u64(m.Epoch)
 		e.u64(m.MinOpNum)
 		e.str(m.From)
 	case CheckpointInfo:
+		e.u64(m.Epoch)
 		e.u64(m.OpNum)
 		e.u64(m.Size)
 		e.int(m.PageSize)
@@ -209,9 +211,9 @@ func DecodeMessage(b []byte) (Message, error) {
 	case MsgEpochStarted:
 		m = EpochStarted{Epoch: d.u64(), Replica: d.int()}
 	case MsgGetCheckpoint:
-		m = GetCheckpoint{MinOpNum: d.u64(), From: d.str()}
+		m = GetCheckpoint{Epoch: d.u64(), MinOpNum: d.u64(), From: d.str()}
 	case MsgCheckpointInfo:
-		m = CheckpointInfo{OpNum: d.u64(), Size: d.u64(), PageSize: d.int(), Root: d.bytes(), Clients: d.bytes()}
+		m = CheckpointInfo{Epoch: d.u64(), OpNum: d.u64(), Size: d.u64(), PageSize: d.int(), Root: d.bytes(), Clients: d.bytes()}
 	case MsgGetMerkle:
 		m = GetMerkle{OpNum: d.u64(), Level: d.int(), Indices: d.u64s(), From: d.str()}
 	case MsgMerkleNodes:

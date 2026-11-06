@@ -14,6 +14,7 @@ const (
 	defaultHeartbeatTicks  = 10
 	defaultViewChangeTicks = 50
 	defaultResendTicks     = 20
+	defaultPageSize        = 4096
 	maxPrepareResend       = 64
 	seedSalt               = 0x9e3779b97f4a7c15
 )
@@ -44,6 +45,14 @@ type Options struct {
 	ViewChangeTicks int
 	// ResendTicks is the retransmission interval in ticks.
 	ResendTicks int
+	// CheckpointInterval is the number of ops between checkpoints; 0 disables checkpoints and log GC.
+	CheckpointInterval int
+	// CheckpointRetain is the number of committed ops kept before log GC; default CheckpointInterval.
+	CheckpointRetain int
+	// PageSize is the Merkle page size used for checkpoint transfer; default 4096.
+	PageSize int
+	// Checkpoint is restored at startup and requires Recovering.
+	Checkpoint *Checkpoint
 }
 
 type clientRecord struct {
@@ -61,11 +70,16 @@ type Replica struct {
 	joining   bool
 	service   Service
 	outbox    Outbox
+	snap      Snapshotter
 	rng       *rand.Rand
 
 	heartbeatTicks  int
 	viewChangeTicks int
 	resendTicks     int
+
+	checkpointInterval uint64
+	checkpointRetain   uint64
+	pageSize           int
 
 	epoch          uint64
 	epochStart     uint64
@@ -74,8 +88,12 @@ type Replica struct {
 	view           uint64
 	lastNormalView uint64
 	status         Status
+	base           uint64
 	log            []Entry
+	ckpts          []checkpoint
+	fetch          *fetch
 	commitNum      uint64
+	commitTarget   uint64
 	clientTable    map[uint64]clientRecord
 	inflight       map[uint64]uint64
 
@@ -90,6 +108,7 @@ type Replica struct {
 
 	stateReq    bool
 	stateTarget uint64
+	stateFrom   string
 
 	now      int
 	deadline int
@@ -103,28 +122,38 @@ func NewReplica(o Options) (*Replica, error) {
 		return nil, err
 	}
 	n := len(o.Config)
+	snap, _ := o.Service.(Snapshotter)
 	r := &Replica{
-		addr:            o.Addr,
-		config:          slices.Clone(o.Config),
-		oldConfig:       slices.Clone(o.OldConfig),
-		index:           index,
-		faults:          (n - 1) / 2,
-		joining:         o.Join,
-		epoch:           o.Epoch,
-		service:         o.Service,
-		outbox:          o.Outbox,
-		rng:             rand.New(rand.NewPCG(uint64(o.Seed), uint64(o.Seed)^seedSalt)),
-		heartbeatTicks:  orDefault(o.HeartbeatTicks, defaultHeartbeatTicks),
-		viewChangeTicks: orDefault(o.ViewChangeTicks, defaultViewChangeTicks),
-		resendTicks:     orDefault(o.ResendTicks, defaultResendTicks),
-		started:         make(map[int]bool),
-		clientTable:     make(map[uint64]clientRecord),
-		inflight:        make(map[uint64]uint64),
-		acked:           make([]uint64, n),
-		ackBuf:          make([]uint64, 0, n),
-		svc:             make(map[int]bool),
-		dvcs:            make(map[int]DoViewChange),
-		responses:       make(map[int]RecoveryResponse),
+		addr:               o.Addr,
+		config:             slices.Clone(o.Config),
+		oldConfig:          slices.Clone(o.OldConfig),
+		index:              index,
+		faults:             (n - 1) / 2,
+		joining:            o.Join,
+		epoch:              o.Epoch,
+		service:            o.Service,
+		outbox:             o.Outbox,
+		snap:               snap,
+		checkpointInterval: uint64(max(o.CheckpointInterval, 0)),
+		checkpointRetain:   uint64(orDefault(o.CheckpointRetain, o.CheckpointInterval)),
+		pageSize:           orDefault(o.PageSize, defaultPageSize),
+		rng:                rand.New(rand.NewPCG(uint64(o.Seed), uint64(o.Seed)^seedSalt)),
+		heartbeatTicks:     orDefault(o.HeartbeatTicks, defaultHeartbeatTicks),
+		viewChangeTicks:    orDefault(o.ViewChangeTicks, defaultViewChangeTicks),
+		resendTicks:        orDefault(o.ResendTicks, defaultResendTicks),
+		started:            make(map[int]bool),
+		clientTable:        make(map[uint64]clientRecord),
+		inflight:           make(map[uint64]uint64),
+		acked:              make([]uint64, n),
+		ackBuf:             make([]uint64, 0, n),
+		svc:                make(map[int]bool),
+		dvcs:               make(map[int]DoViewChange),
+		responses:          make(map[int]RecoveryResponse),
+	}
+	if o.Checkpoint != nil {
+		if err := r.restoreCheckpoint(*o.Checkpoint); err != nil {
+			return nil, fmt.Errorf("%w: checkpoint: %w", ErrInvalidOptions, err)
+		}
 	}
 	switch {
 	case o.Join:
@@ -142,6 +171,7 @@ func NewReplica(o Options) (*Replica, error) {
 }
 
 func validateOptions(o Options) (int, error) {
+	_, snapshotter := o.Service.(Snapshotter)
 	switch {
 	case o.Service == nil:
 		return 0, fmt.Errorf("%w: nil service", ErrInvalidOptions)
@@ -149,6 +179,12 @@ func validateOptions(o Options) (int, error) {
 		return 0, fmt.Errorf("%w: nil outbox", ErrInvalidOptions)
 	case o.HeartbeatTicks < 0 || o.ViewChangeTicks < 0 || o.ResendTicks < 0:
 		return 0, fmt.Errorf("%w: negative tick count", ErrInvalidOptions)
+	case o.CheckpointInterval < 0 || o.CheckpointRetain < 0 || o.PageSize < 0:
+		return 0, fmt.Errorf("%w: negative checkpoint option", ErrInvalidOptions)
+	case (o.CheckpointInterval > 0 || o.Checkpoint != nil) && !snapshotter:
+		return 0, fmt.Errorf("%w: checkpoints require a Snapshotter service", ErrInvalidOptions)
+	case o.Checkpoint != nil && !o.Recovering:
+		return 0, fmt.Errorf("%w: checkpoint requires recovering", ErrInvalidOptions)
 	case o.Join && o.Recovering:
 		return 0, fmt.Errorf("%w: join and recovering are exclusive", ErrInvalidOptions)
 	}
@@ -190,8 +226,20 @@ func (r *Replica) Status() Status { return r.status }
 // View returns the current view number.
 func (r *Replica) View() uint64 { return r.view }
 
-// OpNum returns the number of log entries.
-func (r *Replica) OpNum() uint64 { return uint64(len(r.log)) }
+// LogBase returns the op number that the retained log starts after.
+func (r *Replica) LogBase() uint64 { return r.base }
+
+// Checkpoint returns the latest held checkpoint, or nil if there is none.
+func (r *Replica) Checkpoint() *Checkpoint {
+	if len(r.ckpts) == 0 {
+		return nil
+	}
+	c := r.ckpts[len(r.ckpts)-1].Checkpoint
+	return &c
+}
+
+// OpNum returns the op number of the last log entry.
+func (r *Replica) OpNum() uint64 { return r.base + uint64(len(r.log)) }
 
 // CommitNum returns the number of committed entries.
 func (r *Replica) CommitNum() uint64 { return r.commitNum }
@@ -256,6 +304,18 @@ func (r *Replica) Step(m Message) {
 		r.onStartEpoch(m)
 	case EpochStarted:
 		r.onEpochStarted(m)
+	case GetCheckpoint:
+		r.onGetCheckpoint(m)
+	case CheckpointInfo:
+		r.onCheckpointInfo(m)
+	case GetMerkle:
+		r.onGetMerkle(m)
+	case MerkleNodes:
+		r.onMerkleNodes(m)
+	case GetPages:
+		r.onGetPages(m)
+	case Pages:
+		r.onPages(m)
 	}
 }
 
@@ -278,9 +338,12 @@ func (r *Replica) Tick() {
 }
 
 func (r *Replica) resend() {
+	if r.fetch != nil {
+		r.resendFetch()
+	}
 	switch r.status {
 	case StatusRecovering:
-		r.broadcast(Recovery{Epoch: r.epoch, Nonce: r.nonce, Replica: r.index})
+		r.broadcast(Recovery{Epoch: r.epoch, Nonce: r.nonce, Replica: r.index, CheckpointNum: r.base})
 	case StatusViewChange:
 		r.broadcast(StartViewChange{Epoch: r.epoch, View: r.view, Replica: r.index})
 		if r.dvcSent {
@@ -334,9 +397,17 @@ func (r *Replica) enterNormal(v uint64) {
 
 func (r *Replica) rebuildInflight() {
 	clear(r.inflight)
-	for _, e := range r.log[r.commitNum:] {
+	for _, e := range r.entriesAfter(r.commitNum) {
 		r.inflight[e.ClientID] = e.RequestNum
 	}
+}
+
+func (r *Replica) entry(n uint64) Entry {
+	return r.log[n-r.base-1]
+}
+
+func (r *Replica) entriesAfter(n uint64) []Entry {
+	return r.log[min(max(n, r.base)-r.base, uint64(len(r.log))):]
 }
 
 func (r *Replica) appendEntry(e Entry) {

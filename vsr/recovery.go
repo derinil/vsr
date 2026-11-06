@@ -6,12 +6,14 @@ func (r *Replica) onRecovery(m Recovery) {
 	if r.status != StatusNormal || !r.validReplica(m.Replica) {
 		return
 	}
-	resp := RecoveryResponse{Epoch: r.epoch, View: r.view, Nonce: m.Nonce, Replica: r.index}
+	resp := RecoveryResponse{Epoch: r.epoch, View: r.view, Nonce: m.Nonce, Replica: r.index, EpochStart: r.epochStart}
 	if r.IsPrimary() {
+		lb := max(m.CheckpointNum, r.base)
 		resp.HasLog = true
 		resp.OpNum = r.OpNum()
 		resp.CommitNum = r.commitNum
-		resp.Log = slices.Clip(r.log)
+		resp.LogBase = lb
+		resp.Log = slices.Clip(r.entriesAfter(lb))
 	}
 	r.send(m.Replica, resp)
 }
@@ -32,8 +34,8 @@ func (r *Replica) onRecoveryResponse(m RecoveryResponse) {
 	if !ok || p.View != latest || !p.HasLog {
 		return
 	}
-	r.log = slices.Clone(p.Log)
-	r.epochStart = epochStartIn(r.log, r.config)
+	r.epochStart = p.EpochStart
+	r.adoptLog(p.LogBase, p.Log, r.config[p.Replica])
 	r.enterNormal(latest)
 	clear(r.responses)
 	r.commitUpTo(p.CommitNum)

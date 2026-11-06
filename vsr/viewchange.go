@@ -93,7 +93,7 @@ func (r *Replica) becomePrimary() {
 			best = &d
 		}
 	}
-	r.log = slices.Clone(best.Log)
+	r.adoptLog(best.LogBase, best.Log, r.config[best.Replica])
 	r.enterNormal(r.view)
 	r.broadcast(r.startViewMsg(commit))
 	r.commitUpTo(commit)
@@ -110,7 +110,7 @@ func (r *Replica) onStartView(m StartView) {
 	if m.View < r.view || (m.View == r.view && r.status != StatusViewChange) {
 		return
 	}
-	r.log = slices.Clone(m.Log)
+	r.adoptLog(m.LogBase, m.Log, r.config[r.primaryOf(m.View)])
 	r.enterNormal(m.View)
 	if r.OpNum() > m.CommitNum {
 		r.send(r.primaryOf(m.View), PrepareOK{Epoch: r.epoch, View: m.View, OpNum: r.OpNum(), Replica: r.index})
@@ -127,6 +127,7 @@ func (r *Replica) doViewChange() DoViewChange {
 		CommitNum:      r.commitNum,
 		Log:            slices.Clip(r.log),
 		Replica:        r.index,
+		LogBase:        r.base,
 	}
 }
 
@@ -137,5 +138,6 @@ func (r *Replica) startViewMsg(commit uint64) StartView {
 		OpNum:     r.OpNum(),
 		CommitNum: commit,
 		Log:       slices.Clip(r.log),
+		LogBase:   r.base,
 	}
 }

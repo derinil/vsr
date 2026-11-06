@@ -1,6 +1,7 @@
 package vsr
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"testing"
@@ -23,7 +24,7 @@ func TestRandomizedSimulation(t *testing.T) {
 		for seed := range seeds {
 			t.Run(fmt.Sprintf("replicas=%d/seed=%d", n, seed+1), func(t *testing.T) {
 				t.Parallel()
-				runRandom(t, n, int64(seed+1), false)
+				runRandom(t, n, int64(seed+1), false, checkpointing{})
 			})
 		}
 	}
@@ -37,13 +38,49 @@ func TestRandomizedReconfiguration(t *testing.T) {
 	for seed := range seeds {
 		t.Run(fmt.Sprintf("seed=%d", seed+1), func(t *testing.T) {
 			t.Parallel()
-			runRandom(t, 3, int64(seed+1), true)
+			runRandom(t, 3, int64(seed+1), true, checkpointing{})
 		})
 	}
 }
 
-func runRandom(t *testing.T, n int, seed int64, reconfigure bool) {
-	c := newCluster(t, n, seed)
+func TestRandomizedCheckpointSimulation(t *testing.T) {
+	seeds := 300
+	if testing.Short() {
+		seeds = 30
+	}
+	for _, n := range []int{3, 5} {
+		for seed := range seeds {
+			t.Run(fmt.Sprintf("replicas=%d/seed=%d", n, seed+1), func(t *testing.T) {
+				t.Parallel()
+				runRandom(t, n, int64(seed+1), false, randomCheckpointing(int64(seed+1)))
+			})
+		}
+	}
+}
+
+func TestRandomizedCheckpointReconfiguration(t *testing.T) {
+	seeds := 100
+	if testing.Short() {
+		seeds = 20
+	}
+	for seed := range seeds {
+		t.Run(fmt.Sprintf("seed=%d", seed+1), func(t *testing.T) {
+			t.Parallel()
+			runRandom(t, 3, int64(seed+1), true, randomCheckpointing(int64(seed+1)))
+		})
+	}
+}
+
+func randomCheckpointing(seed int64) checkpointing {
+	return checkpointing{
+		interval: 5 + int(seed%7),
+		retain:   3 + int(seed%5),
+		pageSize: 16 * (1 + int(seed%4)),
+	}
+}
+
+func runRandom(t *testing.T, n int, seed int64, reconfigure bool, cp checkpointing) {
+	c := newClusterWith(t, n, seed, cp)
 	for range randomClients {
 		c.addClient(randomOpsPerClient)
 	}
@@ -71,6 +108,7 @@ func runRandom(t *testing.T, n int, seed int64, reconfigure bool) {
 	for range randomFinalTicks {
 		if c.converged() {
 			c.check()
+			c.checkCommittedLogs()
 			return
 		}
 		c.restartOneMember()
@@ -79,6 +117,25 @@ func runRandom(t *testing.T, n int, seed int64, reconfigure bool) {
 		c.check()
 	}
 	t.Fatalf("seed %d: no convergence after healing: %s", seed, c.describe())
+}
+
+func (c *cluster) checkCommittedLogs() {
+	c.t.Helper()
+	for i, a := range c.replicas {
+		for j, b := range c.replicas {
+			if i >= j || a == nil || b == nil {
+				continue
+			}
+			lo, hi := max(a.LogBase(), b.LogBase()), min(a.CommitNum(), b.CommitNum())
+			la, lb := a.Log(), b.Log()
+			for op := lo + 1; op <= hi; op++ {
+				x, y := la[op-a.LogBase()-1], lb[op-b.LogBase()-1]
+				if x.Kind != y.Kind || x.ClientID != y.ClientID || x.RequestNum != y.RequestNum || !bytes.Equal(x.Op, y.Op) || !slices.Equal(x.Config, y.Config) {
+					c.t.Fatalf("seed %d: replicas %d and %d disagree on committed op %d", c.seed, i, j, op)
+				}
+			}
+		}
+	}
 }
 
 func (c *cluster) chaos(admin *simClient, pool []string) {

@@ -25,9 +25,9 @@ func (r *Replica) admit(m Message) bool {
 	case NewState:
 		return m.Epoch == r.epoch && r.listening()
 	case Prepare:
-		return m.Epoch == r.epoch && r.active()
+		return r.admitPrimary(m.Epoch, m.View, r.active())
 	case Commit:
-		return m.Epoch == r.epoch && r.active()
+		return r.admitPrimary(m.Epoch, m.View, r.active())
 	case StartView:
 		return m.Epoch == r.epoch && r.active()
 	case GetState:
@@ -42,6 +42,14 @@ func (r *Replica) admit(m Message) bool {
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.active())
 	case Recovery:
 		return r.admitPeer(m.Epoch, m.Replica, r.oldConfig, r.active())
+	case GetCheckpoint, GetMerkle, GetPages:
+		return r.status != StatusShutdown
+	case CheckpointInfo:
+		return r.fetch != nil && m.Epoch == r.epoch
+	case MerkleNodes:
+		return r.fetchingAt(m.OpNum)
+	case Pages:
+		return r.fetchingAt(m.OpNum)
 	}
 	return false
 }
@@ -78,6 +86,16 @@ func (r *Replica) admitPeer(epoch uint64, sender int, cfg []string, open bool) b
 	return false
 }
 
+func (r *Replica) admitPrimary(epoch, view uint64, open bool) bool {
+	switch {
+	case epoch == r.epoch:
+		return open
+	case epoch+1 == r.epoch && len(r.oldConfig) > 0:
+		r.notifyLower(r.oldConfig, int(view%uint64(len(r.oldConfig))))
+	}
+	return false
+}
+
 func (r *Replica) notifyLower(cfg []string, sender int) {
 	own := slices.Index(r.oldConfig, r.addr)
 	if !r.listening() || own < 0 || !validIndex(sender, len(cfg)) {
@@ -91,7 +109,7 @@ func (r *Replica) startEpochFrom(own int) StartEpoch {
 }
 
 func (r *Replica) propose(client, req uint64, e Entry) {
-	if !r.IsPrimary() || r.pendingReconfig() {
+	if !r.IsPrimary() || r.fetch != nil || r.pendingReconfig() {
 		return
 	}
 	if rec, ok := r.clientTable[client]; ok && req <= rec.req {
@@ -113,7 +131,7 @@ func (r *Replica) propose(client, req uint64, e Entry) {
 
 func (r *Replica) pendingReconfig() bool {
 	n := r.OpNum()
-	return n > r.epochStart && r.log[n-1].Kind == EntryReconfig
+	return n > r.epochStart && n > r.base && r.entry(n).Kind == EntryReconfig
 }
 
 func (r *Replica) onReconfiguration(m Reconfiguration) {
@@ -145,15 +163,6 @@ func validConfig(config []string) bool {
 
 func validIndex(i, n int) bool {
 	return i >= 0 && i < n
-}
-
-func epochStartIn(log []Entry, config []string) uint64 {
-	for i, e := range slices.Backward(log) {
-		if e.Kind == EntryReconfig && slices.Equal(e.Config, config) {
-			return uint64(i + 1)
-		}
-	}
-	return 0
 }
 
 func (r *Replica) switchEpoch(e Entry) {
@@ -189,19 +198,22 @@ func (r *Replica) setEpoch(epoch, n uint64, old, config []string) {
 	clear(r.responses)
 	r.stateReq = false
 	r.stateTarget = 0
+	if r.fetch != nil {
+		r.restartFetch()
+	}
 }
 
 func (r *Replica) enterEpoch(epoch, n uint64, old, config []string) {
 	r.setEpoch(epoch, n, old, config)
 	r.status = StatusTransitioning
-	r.log = r.log[:min(n, r.commitNum)]
+	r.log = r.log[:max(min(n, r.commitNum), r.base)-r.base]
 	r.rebuildInflight()
 	r.tryFinishTransition()
 }
 
 func (r *Replica) tryFinishTransition() {
 	switch {
-	case r.index < 0:
+	case r.index < 0 || r.fetch != nil:
 		return
 	case r.commitNum < r.epochStart:
 		r.requestEpochState()
@@ -220,7 +232,8 @@ func (r *Replica) requestEpochState() {
 	if len(peers) == 0 {
 		return
 	}
-	r.outbox.Send(peers[r.catchUp%len(peers)], GetState{Epoch: r.epoch, OpNum: r.commitNum, Replica: r.index})
+	r.stateFrom = peers[r.catchUp%len(peers)]
+	r.outbox.Send(r.stateFrom, GetState{Epoch: r.epoch, OpNum: r.commitNum, Replica: r.index})
 	r.catchUp++
 }
 
@@ -228,7 +241,9 @@ func (r *Replica) resendTransition() {
 	switch {
 	case r.joining:
 	case r.index >= 0:
-		r.requestEpochState()
+		if r.fetch == nil {
+			r.requestEpochState()
+		}
 	default:
 		r.announceStart()
 	}
@@ -279,6 +294,7 @@ func (r *Replica) onEpochStarted(m EpochStarted) {
 		r.started[m.Replica] = true
 		if len(r.started) > r.faults {
 			r.status = StatusShutdown
+			r.fetch = nil
 		}
 	}
 }
