@@ -133,7 +133,7 @@ func (f *fakeCluster) invoke(_ context.Context, op []byte) ([]byte, error) {
 
 func line(t *testing.T, src, dest, body string) []byte {
 	t.Helper()
-	return []byte(fmt.Sprintf(`{"src":%q,"dest":%q,"body":%s}`, src, dest, body))
+	return fmt.Appendf(nil, `{"src":%q,"dest":%q,"body":%s}`, src, dest, body)
 }
 
 func TestNodeLinesAgainstStore(t *testing.T) {

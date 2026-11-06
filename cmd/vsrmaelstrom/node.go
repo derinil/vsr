@@ -77,11 +77,7 @@ func (n *node) handle(line []byte) {
 		n.mu.Unlock()
 		n.send(env.Src, env.Body.MsgID, map[string]any{"type": "init_ok"})
 	case "read", "write", "cas":
-		n.wg.Add(1)
-		go func() {
-			defer n.wg.Done()
-			n.serve(env)
-		}()
+		n.wg.Go(func() { n.serve(env) })
 	default:
 		n.send(env.Src, env.Body.MsgID, errorBody(codeNotSupported, fmt.Sprintf("unsupported type %q", env.Body.Type)))
 	}

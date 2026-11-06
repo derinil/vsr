@@ -387,9 +387,7 @@ func TestConcurrentClients(t *testing.T) {
 	errs := make(chan error, clients)
 	var wg sync.WaitGroup
 	for i, cl := range cls {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := workload(cl, fmt.Sprintf("key-%d", i), ops); err != nil {
 				errs <- err
 				return
@@ -401,7 +399,7 @@ func TestConcurrentClients(t *testing.T) {
 				}
 			}
 			errs <- nil
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

@@ -76,7 +76,7 @@ func envOr(getenv func(string) string, key, fallback string) string {
 
 func splitList(s string) []string {
 	var out []string
-	for _, item := range strings.Split(s, ",") {
+	for item := range strings.SplitSeq(s, ",") {
 		if item = strings.TrimSpace(item); item != "" {
 			out = append(out, item)
 		}

@@ -148,8 +148,8 @@ func validIndex(i, n int) bool {
 }
 
 func epochStartIn(log []Entry, config []string) uint64 {
-	for i := len(log) - 1; i >= 0; i-- {
-		if log[i].Kind == EntryReconfig && slices.Equal(log[i].Config, config) {
+	for i, e := range slices.Backward(log) {
+		if e.Kind == EntryReconfig && slices.Equal(e.Config, config) {
 			return uint64(i + 1)
 		}
 	}

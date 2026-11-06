@@ -119,7 +119,7 @@ func (t *Transport) Listen(addr string) error {
 		return errListening
 	}
 	t.ln = ln
-	t.goRun(func() { t.acceptLoop(ln) })
+	t.wg.Go(func() { t.acceptLoop(ln) })
 	return nil
 }
 
@@ -146,7 +146,7 @@ func (t *Transport) Send(to string, m vsr.Message) {
 	if !ok {
 		out = make(chan []byte, t.opts.QueueSize)
 		t.peers[to] = out
-		t.goRun(func() { t.runPeer(to, out) })
+		t.wg.Go(func() { t.runPeer(to, out) })
 	}
 	enqueue(out, b)
 }
@@ -187,14 +187,6 @@ func (t *Transport) Close() error {
 	}
 	t.wg.Wait()
 	return err
-}
-
-func (t *Transport) goRun(f func()) {
-	t.wg.Add(1)
-	go func() {
-		defer t.wg.Done()
-		f()
-	}()
 }
 
 func (t *Transport) frame(m vsr.Message) []byte {
@@ -241,7 +233,7 @@ func (t *Transport) acceptLoop(ln net.Listener) {
 		if !ok {
 			return
 		}
-		t.goRun(func() { t.runConn(c, true) })
+		t.wg.Go(func() { t.runConn(c, true) })
 	}
 }
 
@@ -289,7 +281,7 @@ func (t *Transport) untrack(c *conn) {
 }
 
 func (t *Transport) runConn(c *conn, inbound bool) {
-	t.goRun(func() { t.readLoop(c, inbound) })
+	t.wg.Go(func() { t.readLoop(c, inbound) })
 	t.writeLoop(c)
 	c.close()
 	t.untrack(c)
