@@ -213,8 +213,9 @@ function summarize(replicas, up) {
   const primary = up.filter((rep) => rep.node.primary).sort((a, b) => b.node.view - a.node.view)[0];
   const views = up.map((rep) => rep.node.view);
   const commits = up.map((rep) => rep.node.commitNum);
-  const connected = up.reduce((sum, rep) => sum + rep.node.peers.filter((peer) => peer.connected).length, 0);
-  const expected = total * (total - 1);
+  const peers = up.flatMap((rep) => rep.node.peers);
+  const connected = peers.filter((peer) => peer.connected).length;
+  const expected = peers.length;
   const reconfiguring = up.some((rep) => rep.node.oldConfig?.length);
   const viewsAgree = min(views) === max(views);
   return [
@@ -254,7 +255,7 @@ function summarize(replicas, up) {
     {
       label: 'Peer links',
       value: expected ? `${connected} / ${expected}` : '—',
-      sub: 'connected edges',
+      sub: connected === expected ? 'all open links connected' : `${expected - connected} disconnected`,
       tone: linkTone(connected, expected),
     },
   ];
