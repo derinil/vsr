@@ -7,16 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
-)
 
-const shutdownTimeout = 5 * time.Second
+	"github.com/derinil/vsr/internal/vsrmon"
+)
 
 func main() {
 	opts, err := parseOptions(os.Args[1:], os.Getenv)
@@ -61,32 +59,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 func run(o options, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	m := newMonitor(o.nodes, o.interval, o.timeout, logger)
-	handler, err := newHandler(m)
-	if err != nil {
-		return err
-	}
-	srv := &http.Server{
-		Addr:              o.listen,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
-	}
-
-	go m.run(ctx)
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	logger.Info("vsrmon listening", "addr", o.listen, "nodes", len(o.nodes))
-
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	return vsrmon.Serve(ctx, vsrmon.New(o.nodes, o.interval, o.timeout, logger), o.listen, logger)
 }
 
 func normalizeNodes(items []string) []string {

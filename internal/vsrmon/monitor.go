@@ -1,4 +1,5 @@
-package main
+// Package vsrmon polls replica status endpoints and serves a live dashboard.
+package vsrmon
 
 import (
 	"context"
@@ -16,7 +17,8 @@ import (
 
 const maxStatusBytes = 1 << 20
 
-type monitor struct {
+// Monitor polls replicas and publishes the aggregated cluster status.
+type Monitor struct {
 	nodes    []string
 	interval time.Duration
 	timeout  time.Duration
@@ -26,8 +28,9 @@ type monitor struct {
 	broker   broker
 }
 
-func newMonitor(nodes []string, interval, timeout time.Duration, logger *slog.Logger) *monitor {
-	return &monitor{
+// New returns a Monitor polling nodes, given as base URLs, every interval.
+func New(nodes []string, interval, timeout time.Duration, logger *slog.Logger) *Monitor {
+	return &Monitor{
 		nodes:    nodes,
 		interval: interval,
 		timeout:  timeout,
@@ -36,7 +39,8 @@ func newMonitor(nodes []string, interval, timeout time.Duration, logger *slog.Lo
 	}
 }
 
-func (m *monitor) run(ctx context.Context) {
+// Run polls until ctx is done.
+func (m *Monitor) Run(ctx context.Context) {
 	t := time.NewTicker(m.interval)
 	defer t.Stop()
 	for {
@@ -49,7 +53,7 @@ func (m *monitor) run(ctx context.Context) {
 	}
 }
 
-func (m *monitor) poll(ctx context.Context) {
+func (m *Monitor) poll(ctx context.Context) {
 	targets := make([]vsrstatus.Target, len(m.nodes))
 	var wg sync.WaitGroup
 	for i, base := range m.nodes {
@@ -67,7 +71,7 @@ func (m *monitor) poll(ctx context.Context) {
 	m.publish(data)
 }
 
-func (m *monitor) pollNode(ctx context.Context, base string) vsrstatus.Target {
+func (m *Monitor) pollNode(ctx context.Context, base string) vsrstatus.Target {
 	ctx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 	start := time.Now()
@@ -82,7 +86,7 @@ func (m *monitor) pollNode(ctx context.Context, base string) vsrstatus.Target {
 	return t
 }
 
-func (m *monitor) fetchStatus(ctx context.Context, base string) (vsrstatus.Node, error) {
+func (m *Monitor) fetchStatus(ctx context.Context, base string) (vsrstatus.Node, error) {
 	var n vsrstatus.Node
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/status", nil)
 	if err != nil {
@@ -100,7 +104,7 @@ func (m *monitor) fetchStatus(ctx context.Context, base string) (vsrstatus.Node,
 	return n, err
 }
 
-func (m *monitor) publish(data []byte) {
+func (m *Monitor) publish(data []byte) {
 	m.latest.Store(&data)
 	m.broker.publish(data)
 }

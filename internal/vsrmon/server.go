@@ -1,17 +1,21 @@
-package main
+package vsrmon
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
+	"net"
 	"net/http"
+	"time"
 )
 
 //go:embed web
 var webFS embed.FS
 
-func newHandler(m *monitor) (http.Handler, error) {
+func newHandler(m *Monitor) (http.Handler, error) {
 	site, err := fs.Sub(webFS, "web")
 	if err != nil {
 		return nil, err
@@ -23,7 +27,7 @@ func newHandler(m *monitor) (http.Handler, error) {
 	return mux, nil
 }
 
-func (m *monitor) serveCluster(w http.ResponseWriter, _ *http.Request) {
+func (m *Monitor) serveCluster(w http.ResponseWriter, _ *http.Request) {
 	data := m.latest.Load()
 	if data == nil {
 		http.Error(w, "no poll completed", http.StatusServiceUnavailable)
@@ -33,7 +37,7 @@ func (m *monitor) serveCluster(w http.ResponseWriter, _ *http.Request) {
 	w.Write(*data)
 }
 
-func (m *monitor) serveStream(w http.ResponseWriter, r *http.Request) {
+func (m *Monitor) serveStream(w http.ResponseWriter, r *http.Request) {
 	ch := m.broker.subscribe()
 	defer m.broker.unsubscribe(ch)
 
@@ -63,4 +67,37 @@ func writeEvent(w io.Writer, rc *http.ResponseController, data []byte) error {
 		return err
 	}
 	return rc.Flush()
+}
+
+const shutdownTimeout = 5 * time.Second
+
+// Serve runs m and serves its dashboard on listen until ctx is done.
+func Serve(ctx context.Context, m *Monitor, listen string, logger *slog.Logger) error {
+	handler, err := newHandler(m)
+	if err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+
+	go m.Run(ctx)
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ln) }()
+	logger.Info("dashboard listening", "addr", ln.Addr().String(), "nodes", len(m.nodes))
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }

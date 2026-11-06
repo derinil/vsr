@@ -1,4 +1,4 @@
-package main
+package vsrmon
 
 import (
 	"context"
@@ -24,8 +24,8 @@ func healthyHandler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) { w.Write(body) }
 }
 
-func testMonitor(nodes ...string) *monitor {
-	return newMonitor(nodes, time.Second, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func testMonitor(nodes ...string) *Monitor {
+	return New(nodes, time.Second, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func startNode(t *testing.T, h http.HandlerFunc, down bool) string {
@@ -39,7 +39,7 @@ func startNode(t *testing.T, h http.HandlerFunc, down bool) string {
 	return srv.URL
 }
 
-func latestCluster(t *testing.T, m *monitor) vsrstatus.Cluster {
+func latestCluster(t *testing.T, m *Monitor) vsrstatus.Cluster {
 	t.Helper()
 	data := m.latest.Load()
 	if data == nil {

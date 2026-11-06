@@ -1,4 +1,4 @@
-package main
+package vsrmon
 
 import "sync"
 
