@@ -3,22 +3,22 @@ package main
 import (
 	"context"
 
-	"github.com/derinil/vsr/vsrclient"
+	"github.com/derinil/vsr"
 )
 
 const maxIdleClients = 256
 
 type pool struct {
-	opts vsrclient.Options
-	idle chan *vsrclient.Client
+	opts vsr.ClientOptions
+	idle chan *vsr.Client
 }
 
-func newPool(opts vsrclient.Options) (*pool, error) {
-	c, err := vsrclient.New(opts)
+func newPool(opts vsr.ClientOptions) (*pool, error) {
+	c, err := vsr.NewClient(opts)
 	if err != nil {
 		return nil, err
 	}
-	p := &pool{opts: opts, idle: make(chan *vsrclient.Client, maxIdleClients)}
+	p := &pool{opts: opts, idle: make(chan *vsr.Client, maxIdleClients)}
 	p.idle <- c
 	return p, nil
 }
@@ -32,16 +32,16 @@ func (p *pool) invoke(ctx context.Context, op []byte) ([]byte, error) {
 	return c.Invoke(ctx, op)
 }
 
-func (p *pool) get() (*vsrclient.Client, error) {
+func (p *pool) get() (*vsr.Client, error) {
 	select {
 	case c := <-p.idle:
 		return c, nil
 	default:
-		return vsrclient.New(p.opts)
+		return vsr.NewClient(p.opts)
 	}
 }
 
-func (p *pool) put(c *vsrclient.Client) {
+func (p *pool) put(c *vsr.Client) {
 	select {
 	case p.idle <- c:
 	default:

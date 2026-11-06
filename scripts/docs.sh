@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/build/docs"
-packages=(vsr vsrclient vsrreplica vsrtcp kvservice cmd/vsrd cmd/vsrctl cmd/vsrmaelstrom)
+packages=(. internal/protocol internal/vsrtcp internal/vsrstatus internal/kvservice cmd/vsrd cmd/vsrctl cmd/vsrmon cmd/vsrmaelstrom)
 
 usage() {
 	echo "usage: $0 [serve|gen]" >&2
@@ -16,14 +16,14 @@ gen() {
 	rm -rf "$out"
 	mkdir -p "$out"
 	for p in "${packages[@]}"; do
-		f="$out/${p//\//-}.txt"
+		f="$out/$( [[ $p == . ]] && echo vsr || echo "${p//\//-}").txt"
 		(cd "$root" && go doc -all "./$p") >"$f"
 		echo "docs: $f" >&2
 	done
 }
 
 serve() {
-	cd "$root/vsr"
+	cd "$root"
 	exec go doc -http
 }
 

@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/derinil/vsr/vsrstatus"
+	"github.com/derinil/vsr/internal/vsrstatus"
 )
 
 const maxStatusBytes = 1 << 20

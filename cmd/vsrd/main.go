@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/derinil/vsr/kvservice"
-	"github.com/derinil/vsr/vsrreplica"
+	"github.com/derinil/vsr"
+	"github.com/derinil/vsr/internal/kvservice"
 )
 
 func main() {
@@ -31,10 +31,10 @@ func main() {
 	}
 }
 
-func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options, error) {
+func parseOptions(args []string, getenv func(string) string) (vsr.ReplicaOptions, error) {
 	fs := flag.NewFlagSet("vsrd", flag.ExitOnError)
 	addr := fs.String("addr", getenv("VSR_ADDR"), "this replica's address as it appears in -config (env VSR_ADDR)")
-	listen := fs.String("listen", envOr(getenv, "VSR_LISTEN", fmt.Sprintf(":%d", vsrreplica.DefaultPort)), "listen address (env VSR_LISTEN)")
+	listen := fs.String("listen", envOr(getenv, "VSR_LISTEN", fmt.Sprintf(":%d", vsr.DefaultPort)), "listen address (env VSR_LISTEN)")
 	httpAddr := fs.String("http", getenv("VSR_HTTP"), "status HTTP listen address serving GET /status, empty disables (env VSR_HTTP)")
 	config := fs.String("config", getenv("VSR_CONFIG"), "comma separated replica addresses in canonical order (env VSR_CONFIG)")
 	data := fs.String("data", getenv("VSR_DATA"), "directory for state.json, empty disables persistence (env VSR_DATA)")
@@ -52,11 +52,11 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 	cfg := splitList(*config)
 	switch {
 	case *addr == "":
-		return vsrreplica.Options{}, errors.New("-addr (VSR_ADDR) is required")
+		return vsr.ReplicaOptions{}, errors.New("-addr (VSR_ADDR) is required")
 	case len(cfg) == 0:
-		return vsrreplica.Options{}, errors.New("-config (VSR_CONFIG) is required")
+		return vsr.ReplicaOptions{}, errors.New("-config (VSR_CONFIG) is required")
 	}
-	return vsrreplica.Options{
+	return vsr.ReplicaOptions{
 		Addr:               *addr,
 		Listen:             *listen,
 		HTTPAddr:           *httpAddr,
@@ -75,10 +75,10 @@ func parseOptions(args []string, getenv func(string) string) (vsrreplica.Options
 	}, nil
 }
 
-func run(o vsrreplica.Options) error {
+func run(o vsr.ReplicaOptions) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	s, err := vsrreplica.New(o)
+	s, err := vsr.NewReplica(o)
 	if err != nil {
 		return err
 	}

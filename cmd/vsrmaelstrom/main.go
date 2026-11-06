@@ -13,9 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/derinil/vsr/vsr"
-	"github.com/derinil/vsr/vsrclient"
-	"github.com/derinil/vsr/vsrtcp"
+	"github.com/derinil/vsr"
 )
 
 const defaultClusterList = "127.0.0.1:10188,127.0.0.1:10189,127.0.0.1:10190"
@@ -32,11 +30,8 @@ func main() {
 		slog.Error("invalid configuration", "err", err)
 		os.Exit(2)
 	}
-	p, err := newPool(vsrclient.Options{
-		Config: cfg.cluster,
-		NewTransport: func(h vsr.Handler) vsr.Transport {
-			return vsrtcp.New(h, vsrtcp.Options{})
-		},
+	p, err := newPool(vsr.ClientOptions{
+		Config:         cfg.cluster,
 		RequestTimeout: cfg.requestTimeout,
 	})
 	if err != nil {
@@ -57,7 +52,7 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	cluster := fs.String("cluster", envOr(getenv, "VSR_CLUSTER", defaultClusterList),
 		"comma separated replica addresses in canonical configuration order")
 	timeout := fs.Duration("timeout", time.Second, "per-operation deadline")
-	requestTimeout := fs.Duration("request-timeout", 200*time.Millisecond, "vsrclient request timeout")
+	requestTimeout := fs.Duration("request-timeout", 200*time.Millisecond, "client request timeout")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}

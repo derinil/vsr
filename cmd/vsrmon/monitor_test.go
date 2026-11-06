@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derinil/vsr/vsrstatus"
+	"github.com/derinil/vsr/internal/vsrstatus"
 )
 
 var healthyNode = vsrstatus.Node{Addr: "vsr1:8080", Status: "normal", View: 2, OpNum: 7, CommitNum: 6}

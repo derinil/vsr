@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derinil/vsr/kvservice"
+	"github.com/derinil/vsr/internal/kvservice"
 )
 
 func requireJSON(t *testing.T, got any, want string) {

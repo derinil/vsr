@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/derinil/vsr/kvservice"
+	"github.com/derinil/vsr/internal/kvservice"
 )
 
 const (

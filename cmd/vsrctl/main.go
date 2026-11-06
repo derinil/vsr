@@ -12,10 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/derinil/vsr/kvservice"
-	"github.com/derinil/vsr/vsr"
-	"github.com/derinil/vsr/vsrclient"
-	"github.com/derinil/vsr/vsrtcp"
+	"github.com/derinil/vsr"
+	"github.com/derinil/vsr/internal/kvservice"
 )
 
 const usage = `usage: vsrctl [-cluster a,b,c] [-timeout 30s] <command> [args]
@@ -51,11 +49,8 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 		return errors.New("missing command")
 	}
 
-	cl, err := vsrclient.New(vsrclient.Options{
+	cl, err := vsr.NewClient(vsr.ClientOptions{
 		Config: config,
-		NewTransport: func(h vsr.Handler) vsr.Transport {
-			return vsrtcp.New(h, vsrtcp.Options{})
-		},
 	})
 	if err != nil {
 		return err
@@ -98,7 +93,7 @@ func kvOp(cmd string, args []string) ([]byte, error) {
 	return nil, fmt.Errorf("wrong number of arguments for %s", cmd)
 }
 
-func kvCommand(ctx context.Context, cl *vsrclient.Client, op []byte, cmd string, out io.Writer) error {
+func kvCommand(ctx context.Context, cl *vsr.Client, op []byte, cmd string, out io.Writer) error {
 	b, err := cl.Invoke(ctx, op)
 	if err != nil {
 		return err
