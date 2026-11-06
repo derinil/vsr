@@ -50,7 +50,7 @@ func parseOptions(args []string) (options, error) {
 	n := fs.Int("replicas", 5, "number of replicas")
 	port := fs.Int("port", vsr.DefaultPort, "first replica port; replica i listens on port+i")
 	statusPort := fs.Int("status-port", 18080, "first status port; replica i serves GET /status on status-port+i")
-	listen := fs.String("listen", ":8080", "dashboard listen address")
+	listen := fs.String("listen", ":9999", "dashboard listen address")
 	minWait := fs.Duration("min-interval", time.Second, "minimum delay between queries")
 	maxWait := fs.Duration("max-interval", 3*time.Second, "maximum delay between queries")
 	keys := fs.Int("keys", 5, "number of distinct keys queried")

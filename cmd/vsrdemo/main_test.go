@@ -29,7 +29,7 @@ func TestParseOptions(t *testing.T) {
 			want: options{
 				replicas: []string{"127.0.0.1:10188", "127.0.0.1:10189", "127.0.0.1:10190", "127.0.0.1:10191", "127.0.0.1:10192"},
 				status:   []string{"127.0.0.1:18080", "127.0.0.1:18081", "127.0.0.1:18082", "127.0.0.1:18083", "127.0.0.1:18084"},
-				listen:   ":8080",
+				listen:   ":9999",
 				minWait:  time.Second,
 				maxWait:  3 * time.Second,
 				keys:     5,
