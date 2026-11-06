@@ -1,0 +1,49 @@
+x-replica: &replica
+  build: .
+  image: vsr:latest
+  restart: "no"
+  stop_grace_period: 1s
+  environment: &env
+    VSR_CONFIG: vsr1:10188,vsr2:10188,vsr3:10188,vsr4:10188,vsr5:10188
+    VSR_DATA: /data
+
+services:
+  vsr1:
+    <<: *replica
+    environment:
+      <<: *env
+      VSR_ADDR: vsr1:10188
+    ports:
+      - "10188:10188"
+
+  vsr2:
+    <<: *replica
+    environment:
+      <<: *env
+      VSR_ADDR: vsr2:10188
+    ports:
+      - "10189:10188"
+
+  vsr3:
+    <<: *replica
+    environment:
+      <<: *env
+      VSR_ADDR: vsr3:10188
+    ports:
+      - "10190:10188"
+
+  vsr4:
+    <<: *replica
+    environment:
+      <<: *env
+      VSR_ADDR: vsr4:10188
+    ports:
+      - "10191:10188"
+
+  vsr5:
+    <<: *replica
+    environment:
+      <<: *env
+      VSR_ADDR: vsr5:10188
+    ports:
+      - "10192:10188"
