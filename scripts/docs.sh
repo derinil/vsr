@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/build/docs"
-packages=(. message internal/protocol internal/wire internal/vsrtcp internal/vsrstatus internal/kvservice internal/vsrmon cmd/vsrd cmd/vsrctl cmd/vsrmon cmd/vsrdemo cmd/vsrmaelstrom)
+packages=(. message internal/protocol internal/wire internal/vsrtcp internal/vsrstatus internal/kvservice internal/sqlservice internal/vsrmon cmd/vsrd cmd/vsrctl cmd/vsrmon cmd/vsrdemo cmd/vsrmaelstrom)
 
 usage() {
 	echo "usage: $0 [serve|gen]" >&2
