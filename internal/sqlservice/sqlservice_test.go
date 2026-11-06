@@ -60,6 +60,12 @@ func TestExecute(t *testing.T) {
 			},
 		},
 		{
+			name: "date functions",
+			steps: [][2]string{
+				{`[{"sql":"SELECT date(?, '+1 day')","args":["2024-02-28"]}]`, `{"results":[{"columns":["date(?, '+1 day')"],"rows":[["2024-02-29"]]}]}`},
+			},
+		},
+		{
 			name:  "malformed",
 			steps: [][2]string{{`{}`, `{"error":"json: cannot unmarshal object into Go value of type []sqlservice.Stmt"}`}},
 		},
@@ -92,9 +98,6 @@ func TestRejectsNondeterminism(t *testing.T) {
 		"SAVEPOINT x",
 		"SELECT random()",
 		"SELECT randomblob(4)",
-		"SELECT datetime('now')",
-		"SELECT CURRENT_TIMESTAMP",
-		"SELECT strftime('%s', 'now')",
 		"ATTACH 'x.db' AS x",
 		"CREATE TEMP TABLE t (a)",
 		"PRAGMA user_version = 1",

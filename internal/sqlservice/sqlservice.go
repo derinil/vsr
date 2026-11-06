@@ -2,8 +2,12 @@
 // executed atomically in one transaction against an in-memory database.
 //
 // Statements that could make replicas diverge are rejected: transaction
-// control, ATTACH, temporary schema objects, writing pragmas and functions
-// reading the clock or randomness.
+// control, ATTACH, temporary schema objects, writing pragmas, random(),
+// randomblob() and load_extension().
+//
+// Date and time functions are allowed, but each replica reads its own clock
+// for 'now' and CURRENT_DATE, CURRENT_TIME and CURRENT_TIMESTAMP, so writing
+// their results makes replicas diverge. Pass the time as an argument instead.
 package sqlservice
 
 import (
@@ -56,19 +60,9 @@ var readOnlyPragmas = map[string]bool{
 }
 
 var nondeterministic = map[string]bool{
-	"random":            true,
-	"randomblob":        true,
-	"date":              true,
-	"time":              true,
-	"datetime":          true,
-	"julianday":         true,
-	"unixepoch":         true,
-	"strftime":          true,
-	"timediff":          true,
-	"current_date":      true,
-	"current_time":      true,
-	"current_timestamp": true,
-	"load_extension":    true,
+	"random":         true,
+	"randomblob":     true,
+	"load_extension": true,
 }
 
 type serializer interface {
